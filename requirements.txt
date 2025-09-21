@@ -1,0 +1,6 @@
+Flask
+google-generativeai
+pymupdf
+sqlalchemy
+urlextract
+psycopg2-binary
