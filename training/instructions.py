@@ -19,17 +19,6 @@ language_keywords = {
     }
 
 
-language_map = {
-        "english": pregnancy_data.pregnancy_data,
-        "shona": pregnancy_data_shona.pregnancy_data_shona,
-        "ndebele": pregnancy_data_ndebele.pregnancy_data_ndebele,
-        "tonga": pregnancy_data_tonga.pregnancy_data_tonga,
-        "chinyanja": pregnancy_data_chinyanja.pregnancy_data_chinyanja,
-        "bemba": pregnancy_data_bemba.pregnancy_data_bemba,
-        "lozi": pregnancy_data_lozi.pregnancy_data_lozi
-    }
-
-
 cancer_language_map = {
         "english": cervical_cancer_data.cervical_cancer_data
         
@@ -139,14 +128,8 @@ instructions = (
     "If they want to know about a specific pregnancy week or what to expect during pregnancy at certain periods, you will explain to them . Example given below.\n"
     "The information you should tell them about the first week of pregnancy to the last has already been given to you above. If they say they have missed their period, you ask them if they are experiencing any symptoms given to you above. If yes, you tell them the pregnancy week that matches those symptoms and give them the rest of the information in that week. This information includes baby development tips, substances to avoid and planning.\n\n"
     "If they tell you how long they are due, you tell them information in the week matching the time they told you they have been pregnant. They will most likely tell you time in months, you will have to match this to the time in weeks given to you above.\n\n"
-    "If they are using English language, use the English pregnancy data available in pregnancy_data\n\n"
-    "If they are using Shona language, use the Shona pregnancy data available in pregnancy_data_shona\n\n"
-    "If they are using Ndebele language, use the Ndebele pregnancy data available in pregnancy_data_ndebele\n\n"
-    "If they are using Tonga language, use the Tonga pregnancy data available in pregnancy_data_tonga\n\n"
-    "If they are using Chinyanja language, use the Chinyanja pregnancy data available in pregnancy_data_chinyanja\n\n"
-    "If they are using Bemba language, use the Bemba pregnancy data available in pregnancy_data_bemba\n\n"
-    "If they are using Lozi language, use the Lozi pregnancy data available in pregnancy_data_lozi\n\n"
-        
+    "If they are using English language, use the English cervical cancer data available in cervical_cancer_data\n\n"
+           
     "Example:\n\n"
     
     "User: Hi, I think I'm pregnant.\n\n"
@@ -203,6 +186,7 @@ instructions = (
 
     "Backend will hand over the chat to human agent available at +263785019494 and alert the human agent of a new customer request.\n"
 )
+
 
 
 
