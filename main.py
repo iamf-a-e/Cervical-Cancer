@@ -26,7 +26,7 @@ UPSTASH_REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_TOKEN")
 
 class UpstashRedisClient:
     def __init__(self, url, token):
-        self.url = url
+        self.url = url.rstrip('/')  # Remove trailing slash if present
         self.headers = {
             'Authorization': f'Bearer {token}',
             'Content-Type': 'application/json'
@@ -36,7 +36,7 @@ class UpstashRedisClient:
         """Make request to Upstash Redis REST API"""
         try:
             url = f"{self.url}{endpoint}"
-            if data:
+            if data is not None:
                 response = requests.post(url, headers=self.headers, json=data)
             else:
                 response = requests.get(url, headers=self.headers)
@@ -49,12 +49,13 @@ class UpstashRedisClient:
     def set(self, key, value):
         """Set a key-value pair"""
         endpoint = f"/set/{key}"
-        return self._make_request(endpoint, [value])
+        return self._make_request(endpoint, value)
     
     def get(self, key):
         """Get value by key"""
         endpoint = f"/get/{key}"
         result = self._make_request(endpoint)
+        # Upstash returns {'result': value} structure
         return result.get('result') if result else None
     
     def setex(self, key, expiration, value):
@@ -66,13 +67,13 @@ class UpstashRedisClient:
             expiration_seconds = expiration
         
         endpoint = f"/setex/{key}/{expiration_seconds}"
-        return self._make_request(endpoint, [value])
+        return self._make_request(endpoint, value)
     
     def ping(self):
         """Test connection"""
         endpoint = "/ping"
         result = self._make_request(endpoint)
-        return result is not None
+        return result is not None and 'result' in result
 
 # Initialize Upstash Redis client
 redis_client = None
@@ -217,6 +218,7 @@ def save_user_states():
     """Save all user states to Redis"""
     if redis_client:
         try:
+            # Convert user_states to JSON string before saving
             redis_client.set("user_states", json.dumps(user_states))
             logging.info("User states saved to Redis")
         except Exception as e:
@@ -264,6 +266,7 @@ def save_user_conversation(sender, role, message):
             # Keep only the last 100 messages to prevent excessive storage
             if len(conversation) > 100:
                 conversation = conversation[-100:]
+            # Save as JSON string
             redis_client.setex(f"conversation:{sender}", timedelta(days=30), json.dumps(conversation))
             logging.debug(f"Saved conversation for {sender}")
         except Exception as e:
