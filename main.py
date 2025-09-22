@@ -13,6 +13,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from google.api_core.exceptions import ResourceExhausted
 from training import products, instructions, cervical_cancer_data
+import redis
 import json
 import re
 import base64
@@ -20,76 +21,20 @@ from google.oauth2 import service_account
 
 logging.basicConfig(level=logging.INFO)
 
-# Upstash Redis configuration
-UPSTASH_REDIS_URL = os.environ.get("UPSTASH_REDIS_URL")
-UPSTASH_REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_TOKEN")
-
-class UpstashRedisClient:
-    def __init__(self, url, token):
-        self.url = url
-        self.headers = {
-            'Authorization': f'Bearer {token}',
-            'Content-Type': 'application/json'
-        }
-    
-    def _make_request(self, endpoint, data=None):
-        """Make request to Upstash Redis REST API"""
-        try:
-            url = f"{self.url}{endpoint}"
-            if data:
-                response = requests.post(url, headers=self.headers, json=data)
-            else:
-                response = requests.get(url, headers=self.headers)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Upstash Redis API request failed: {e}")
-            return None
-    
-    def set(self, key, value):
-        """Set a key-value pair"""
-        endpoint = f"/set/{key}"
-        return self._make_request(endpoint, [value])
-    
-    def get(self, key):
-        """Get value by key"""
-        endpoint = f"/get/{key}"
-        result = self._make_request(endpoint)
-        return result.get('result') if result else None
-    
-    def setex(self, key, expiration, value):
-        """Set key with expiration"""
-        # Convert timedelta to seconds
-        if isinstance(expiration, timedelta):
-            expiration_seconds = int(expiration.total_seconds())
-        else:
-            expiration_seconds = expiration
-        
-        endpoint = f"/setex/{key}/{expiration_seconds}"
-        return self._make_request(endpoint, [value])
-    
-    def ping(self):
-        """Test connection"""
-        endpoint = "/ping"
-        result = self._make_request(endpoint)
-        return result is not None
-
-# Initialize Upstash Redis client
-redis_client = None
-if UPSTASH_REDIS_URL and UPSTASH_REDIS_TOKEN:
+# Initialize Redis connection
+redis_url = os.environ.get("REDIS_URL")
+if redis_url:
     try:
-        redis_client = UpstashRedisClient(UPSTASH_REDIS_URL, UPSTASH_REDIS_TOKEN)
-        if redis_client.ping():
-            logging.info("Successfully connected to Upstash Redis")
-        else:
-            logging.error("Failed to connect to Upstash Redis")
-            redis_client = None
+        redis_client = redis.from_url(redis_url)
+        # Test the connection
+        redis_client.ping()
+        logging.info("Successfully connected to Redis")
     except Exception as e:
-        logging.error(f"Failed to initialize Upstash Redis client: {e}")
+        logging.error(f"Failed to connect to Redis: {e}")
         redis_client = None
 else:
     redis_client = None
-    logging.warning("UPSTASH_REDIS_URL or UPSTASH_REDIS_TOKEN not set, Redis functionality disabled")
+    logging.warning("REDIS_URL not set, Redis functionality disabled")
 
 # Global user states dictionary
 user_states = {}
