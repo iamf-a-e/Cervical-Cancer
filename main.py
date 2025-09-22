@@ -767,18 +767,44 @@ def webhook():
     elif request.method == "POST":
         try:
             data = request.get_json()
-            entry = data["entry"][0]
-            changes = entry["changes"][0]
-            value = changes["value"]
+            logging.info(f"Received webhook data: {json.dumps(data, indent=2)}")  # Add logging
             
-            # Check if messages exist in the webhook data
-            if "messages" in value:
-                message_data = value["messages"][0]
-                phone_id = value["metadata"]["phone_number_id"]
-                message_handler(message_data, phone_id)
+            # Safely navigate the webhook structure
+            if "entry" in data and len(data["entry"]) > 0:
+                entry = data["entry"][0]
+                if "changes" in entry and len(entry["changes"]) > 0:
+                    changes = entry["changes"][0]
+                    if "value" in changes:
+                        value = changes["value"]
+                        
+                        # Check if messages exist in the webhook data
+                        if "messages" in value and len(value["messages"]) > 0:
+                            message_data = value["messages"][0]
+                            
+                            # Get phone_id safely
+                            phone_id = value.get("metadata", {}).get("phone_number_id")
+                            if not phone_id:
+                                # Try alternative location for phone_id
+                                phone_id = value.get("phone_number_id")
+                            
+                            if phone_id:
+                                message_handler(message_data, phone_id)
+                            else:
+                                logging.error("Phone ID not found in webhook data")
+                        else:
+                            logging.info("No messages found in webhook data")
+                    else:
+                        logging.error("No 'value' found in changes")
+                else:
+                    logging.error("No 'changes' found in entry or empty changes")
+            else:
+                logging.error("No 'entry' found in webhook data or empty entry")
+                
         except Exception as e:
             logging.error(f"Error in webhook: {e}")
+            logging.error(f"Webhook data that caused error: {data}")
         return jsonify({"status": "ok"}), 200
+
 
 @app.route("/download_media/<media_id>", methods=["GET"])
 def download_media(media_id):
