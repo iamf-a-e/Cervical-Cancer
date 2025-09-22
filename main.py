@@ -6,7 +6,6 @@ import fitz
 import sched
 import time
 import logging
-from mimetypes import guess_type
 from datetime import datetime, timedelta
 from urlextract import URLExtract
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, func
@@ -50,8 +49,8 @@ bot_name = "Rudo"  # This will be the name of your bot, eg: "Hello I am Astro Bo
 AGENT = "+263719835124"  # Fixed: added quotes to make it a string
 
 # Vertex AI REST API configuration (REPLACED the large aiplatform package)
-VERTEX_AI_ENDPOINT_ID = os.environ.get("VERTEX_AI_ENDPOINT_ID")
-VERTEX_AI_REGION = os.environ.get("VERTEX_AI_REGION")
+VERTEX_AI_ENDPOINT_ID = "9216603443274186752"
+VERTEX_AI_REGION = "us-west4"
 VERTEX_AI_PROJECT = os.environ.get("VERTEX_AI_PROJECT")
 VERTEX_AI_CREDENTIALS_PATH = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
 
@@ -234,40 +233,20 @@ def detect_language(message):
     return "english"  # Default to English
 
 def send(answer, sender, phone_id):
+    """Send message via WhatsApp API"""
     url = f"https://graph.facebook.com/v19.0/{phone_id}/messages"
     headers = {
         'Authorization': f'Bearer {wa_token}',
         'Content-Type': 'application/json'
     }
-    type = "text"
-    body = "body"
-    content = answer
-    image_urls = product_images.image_urls
-
-    # Check if answer contains product_image placeholder
-    if "product_image" in answer:
-        # Extract product name using regex
-        product_match = re.search(r'product_image_(\w+)', answer)
-        if product_match:
-            product_name = product_match.group(1)
-            if product_name in image_urls:
-                image_url = image_urls[product_name]
-                mime_type, _ = guess_type(image_url.split("/")[-1])
-                if mime_type and mime_type.startswith("image"):
-                    type = "image"
-                    body = "link"
-                    content = image_url
-                    # Remove the product_image placeholder from caption
-                    answer = re.sub(r'product_image_\w+', '', answer)
-
+    
     data = {
         "messaging_product": "whatsapp",
         "to": sender,
-        "type": type,
-        type: {
-            body: content,
-            **({"caption": answer.strip()} if type != "text" else {})
-        },
+        "type": "text",
+        "text": {
+            "body": answer
+        }
     }
 
     response = requests.post(url, headers=headers, json=data)
@@ -278,11 +257,10 @@ def send(answer, sender, phone_id):
     return response
 
 def remove(*file_paths):
+    """Remove files if they exist"""
     for file in file_paths:
         if os.path.exists(file):
             os.remove(file)
-        else:
-            pass
 
 def download_image(url, file_path):
     """Download image from URL"""
@@ -534,7 +512,7 @@ def handle_cervical_cancer_menu(sender, prompt, phone_id):
         state["step"] = "awaiting_cervical_image"
         
     elif "order" in prompt_lower or "product" in prompt_lower or "kutenga" in prompt_lower:
-        # Show cervical cancer products
+        # Show cervical cancer products (text only)
         if lang == "shona":
             send("Tine zvigadzirwa zvegomarara remuromo wechibereko zvinotevera:\n- HPV Vaccine\n- Cervical Screening Kit\n- Pain Relief Medication\n\nUnoda kuziva zvimwe here kana kutenga chimwe?", sender, phone_id)
         else:
@@ -700,7 +678,6 @@ def message_handler(data, phone_id):
         media_type = "image"
         media_url = data["image"]["id"]
         # For WhatsApp, we need to download the image using the Media API
-        # This is a placeholder - you'll need to implement the actual download
         prompt = "[Image received]"
     
     # Save to conversation history
