@@ -18,7 +18,6 @@ import redis
 import json
 import re
 import base64
-from google.cloud import aiplatform
 from google.oauth2 import service_account
 
 logging.basicConfig(level=logging.INFO)
@@ -50,26 +49,85 @@ name = "Fae"  # The bot will consider this person as its owner or creator
 bot_name = "Rudo"  # This will be the name of your bot, eg: "Hello I am Astro Bot"
 AGENT = "+263719835124"  # Fixed: added quotes to make it a string
 
-# Vertex AI configuration
-VERTEX_AI_ENDPOINT = "9216603443274186752.us-west4-519460264942.prediction.vertexai.goog"
-VERTEX_AI_REGION = "us-west4"
+# Vertex AI REST API configuration (REPLACED the large aiplatform package)
+VERTEX_AI_ENDPOINT_ID = os.environ.get("VERTEX_AI_ENDPOINT_ID")
+VERTEX_AI_REGION = os.environ.get("VERTEX_AI_REGION")
 VERTEX_AI_PROJECT = os.environ.get("VERTEX_AI_PROJECT")
-VERTEX_AI_CREDENTIALS = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+VERTEX_AI_CREDENTIALS_PATH = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
 
-# Initialize Vertex AI
-if VERTEX_AI_CREDENTIALS:
+class VertexAIClient:
+    def __init__(self, project_id, endpoint_id, region="us-west4"):
+        self.project_id = project_id
+        self.endpoint_id = endpoint_id
+        self.region = region
+        self.base_url = f"https://{region}-aiplatform.googleapis.com/v1"
+        self.credentials = None
+        self._setup_credentials()
+    
+    def _setup_credentials(self):
+        """Setup Google Cloud credentials"""
+        try:
+            if VERTEX_AI_CREDENTIALS_PATH and os.path.exists(VERTEX_AI_CREDENTIALS_PATH):
+                self.credentials = service_account.Credentials.from_service_account_file(
+                    VERTEX_AI_CREDENTIALS_PATH,
+                    scopes=['https://www.googleapis.com/auth/cloud-platform']
+                )
+                logging.info("Vertex AI credentials loaded successfully")
+            else:
+                # Try using default credentials
+                self.credentials = service_account.Credentials.from_service_account_file(
+                    os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
+                    scopes=['https://www.googleapis.com/auth/cloud-platform']
+                )
+                logging.info("Using default Google Cloud credentials")
+        except Exception as e:
+            logging.error(f"Error setting up credentials: {e}")
+            self.credentials = None
+    
+    def get_access_token(self):
+        """Get access token for API requests"""
+        if self.credentials:
+            try:
+                from google.auth.transport.requests import Request
+                if not self.credentials.valid:
+                    self.credentials.refresh(Request())
+                return self.credentials.token
+            except Exception as e:
+                logging.error(f"Error getting access token: {e}")
+        return None
+    
+    def predict(self, instances):
+        """Make prediction using Vertex AI REST API"""
+        url = f"{self.base_url}/projects/{self.project_id}/locations/{self.region}/endpoints/{self.endpoint_id}:predict"
+        
+        token = self.get_access_token()
+        if not token:
+            return {"error": "Could not authenticate with Vertex AI"}
+        
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        
+        try:
+            response = requests.post(url, headers=headers, json={"instances": instances})
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Vertex AI API request failed: {e}")
+            return {"error": str(e)}
+
+# Initialize Vertex AI client
+vertex_ai_client = None
+if VERTEX_AI_PROJECT and VERTEX_AI_ENDPOINT_ID:
     try:
-        credentials = service_account.Credentials.from_service_account_file(VERTEX_AI_CREDENTIALS)
-        aiplatform.init(
-            project=VERTEX_AI_PROJECT,
-            location=VERTEX_AI_REGION,
-            credentials=credentials
-        )
-        logging.info("Vertex AI initialized successfully")
+        vertex_ai_client = VertexAIClient(VERTEX_AI_PROJECT, VERTEX_AI_ENDPOINT_ID, VERTEX_AI_REGION)
+        logging.info("Vertex AI client initialized successfully")
     except Exception as e:
-        logging.error(f"Failed to initialize Vertex AI: {e}")
+        logging.error(f"Failed to initialize Vertex AI client: {e}")
+        vertex_ai_client = None
 else:
-    logging.warning("Vertex AI credentials not set, cervical cancer staging disabled")
+    logging.warning("Vertex AI project or endpoint ID not set, cervical cancer staging disabled")
 
 app = Flask(__name__)
 genai.configure(api_key=gen_api)
@@ -238,33 +296,57 @@ def download_image(url, file_path):
         return False
 
 def stage_cervical_cancer(image_path):
-    """Stage cervical cancer using Vertex AI model"""
+    """Stage cervical cancer using Vertex AI REST API"""
+    if not vertex_ai_client:
+        return {
+            "stage": "Error",
+            "confidence": 0,
+            "success": False,
+            "error": "Vertex AI client not configured"
+        }
+    
     try:
-        # Initialize the endpoint
-        endpoint = aiplatform.Endpoint(VERTEX_AI_ENDPOINT)
-        
         # Read and encode the image
         with open(image_path, "rb") as f:
             image_data = f.read()
         
-        # Prepare the prediction instance
-        instance = {"image_bytes": {"b64": base64.b64encode(image_data).decode()}}
+        # Prepare the prediction instance for base64 image
+        instance = {
+            "image_bytes": {"b64": base64.b64encode(image_data).decode()}
+        }
         
-        # Make prediction
-        prediction = endpoint.predict(instances=[instance])
+        # Make prediction using REST API
+        prediction_result = vertex_ai_client.predict([instance])
+        
+        if "error" in prediction_result:
+            return {
+                "stage": "Error",
+                "confidence": 0,
+                "success": False,
+                "error": prediction_result["error"]
+            }
         
         # Process the prediction results
-        results = prediction.predictions[0]
-        
-        # Assuming the model returns a dictionary with 'stage' and 'confidence'
-        stage = results.get('stage', 'Unknown')
-        confidence = results.get('confidence', 0)
-        
-        return {
-            "stage": stage,
-            "confidence": confidence,
-            "success": True
-        }
+        if "predictions" in prediction_result and len(prediction_result["predictions"]) > 0:
+            results = prediction_result["predictions"][0]
+            
+            # Adjust these keys based on your actual model's output format
+            stage = results.get('stage', results.get('class', 'Unknown'))
+            confidence = results.get('confidence', results.get('score', 0))
+            
+            return {
+                "stage": stage,
+                "confidence": float(confidence),
+                "success": True
+            }
+        else:
+            return {
+                "stage": "Error",
+                "confidence": 0,
+                "success": False,
+                "error": "No predictions returned from model"
+            }
+            
     except Exception as e:
         logging.error(f"Error in cervical cancer staging: {e}")
         return {
