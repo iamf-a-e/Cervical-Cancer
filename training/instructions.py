@@ -1,4 +1,4 @@
-from training import products, pregnancy_data, pregnancy_data_shona, pregnancy_data_ndebele, pregnancy_data_tonga, pregnancy_data_chinyanja, pregnancy_data_bemba, pregnancy_data_lozi, cervical_cancer_data
+from training import products, cervical_cancer_data
 
 
 company_name="Dawa Health"
@@ -203,6 +203,7 @@ instructions = (
 
     "Backend will hand over the chat to human agent available at +263785019494 and alert the human agent of a new customer request.\n"
 )
+
 
 
 
