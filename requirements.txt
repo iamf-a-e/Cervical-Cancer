@@ -5,3 +5,6 @@ sqlalchemy
 urlextract
 psycopg2-binary
 redis
+google-cloud-aiplatform
+google-cloud-storage
+protobuf
