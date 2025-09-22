@@ -9,7 +9,6 @@ import logging
 from mimetypes import guess_type
 from datetime import datetime, timedelta
 from urlextract import URLExtract
-from training import instructions, product_images
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, func
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
