@@ -26,7 +26,7 @@ UPSTASH_REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_TOKEN")
 
 class UpstashRedisClient:
     def __init__(self, url, token):
-        self.url = url.rstrip('/')  # Remove trailing slash if present
+        self.url = url
         self.headers = {
             'Authorization': f'Bearer {token}',
             'Content-Type': 'application/json'
@@ -36,7 +36,7 @@ class UpstashRedisClient:
         """Make request to Upstash Redis REST API"""
         try:
             url = f"{self.url}{endpoint}"
-            if data is not None:
+            if data:
                 response = requests.post(url, headers=self.headers, json=data)
             else:
                 response = requests.get(url, headers=self.headers)
@@ -49,13 +49,12 @@ class UpstashRedisClient:
     def set(self, key, value):
         """Set a key-value pair"""
         endpoint = f"/set/{key}"
-        return self._make_request(endpoint, value)
+        return self._make_request(endpoint, [value])
     
     def get(self, key):
         """Get value by key"""
         endpoint = f"/get/{key}"
         result = self._make_request(endpoint)
-        # Upstash returns {'result': value} structure
         return result.get('result') if result else None
     
     def setex(self, key, expiration, value):
@@ -67,13 +66,13 @@ class UpstashRedisClient:
             expiration_seconds = expiration
         
         endpoint = f"/setex/{key}/{expiration_seconds}"
-        return self._make_request(endpoint, value)
+        return self._make_request(endpoint, [value])
     
     def ping(self):
         """Test connection"""
         endpoint = "/ping"
         result = self._make_request(endpoint)
-        return result is not None and 'result' in result
+        return result is not None
 
 # Initialize Upstash Redis client
 redis_client = None
@@ -218,7 +217,6 @@ def save_user_states():
     """Save all user states to Redis"""
     if redis_client:
         try:
-            # Convert user_states to JSON string before saving
             redis_client.set("user_states", json.dumps(user_states))
             logging.info("User states saved to Redis")
         except Exception as e:
@@ -266,7 +264,6 @@ def save_user_conversation(sender, role, message):
             # Keep only the last 100 messages to prevent excessive storage
             if len(conversation) > 100:
                 conversation = conversation[-100:]
-            # Save as JSON string
             redis_client.setex(f"conversation:{sender}", timedelta(days=30), json.dumps(conversation))
             logging.debug(f"Saved conversation for {sender}")
         except Exception as e:
@@ -767,44 +764,18 @@ def webhook():
     elif request.method == "POST":
         try:
             data = request.get_json()
-            logging.info(f"Received webhook data: {json.dumps(data, indent=2)}")  # Add logging
+            entry = data["entry"][0]
+            changes = entry["changes"][0]
+            value = changes["value"]
             
-            # Safely navigate the webhook structure
-            if "entry" in data and len(data["entry"]) > 0:
-                entry = data["entry"][0]
-                if "changes" in entry and len(entry["changes"]) > 0:
-                    changes = entry["changes"][0]
-                    if "value" in changes:
-                        value = changes["value"]
-                        
-                        # Check if messages exist in the webhook data
-                        if "messages" in value and len(value["messages"]) > 0:
-                            message_data = value["messages"][0]
-                            
-                            # Get phone_id safely
-                            phone_id = value.get("metadata", {}).get("phone_number_id")
-                            if not phone_id:
-                                # Try alternative location for phone_id
-                                phone_id = value.get("phone_number_id")
-                            
-                            if phone_id:
-                                message_handler(message_data, phone_id)
-                            else:
-                                logging.error("Phone ID not found in webhook data")
-                        else:
-                            logging.info("No messages found in webhook data")
-                    else:
-                        logging.error("No 'value' found in changes")
-                else:
-                    logging.error("No 'changes' found in entry or empty changes")
-            else:
-                logging.error("No 'entry' found in webhook data or empty entry")
-                
+            # Check if messages exist in the webhook data
+            if "messages" in value:
+                message_data = value["messages"][0]
+                phone_id = value["metadata"]["phone_number_id"]
+                message_handler(message_data, phone_id)
         except Exception as e:
             logging.error(f"Error in webhook: {e}")
-            logging.error(f"Webhook data that caused error: {data}")
         return jsonify({"status": "ok"}), 200
-
 
 @app.route("/download_media/<media_id>", methods=["GET"])
 def download_media(media_id):
