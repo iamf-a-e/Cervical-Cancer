@@ -566,7 +566,7 @@ def handle_patient_id(sender, prompt, phone_id):
     elif lang == "lozi":
         send("Ni itumezi! Kacenu, ni lu tumela sitapi sa ku kekula.", sender, phone_id)
     else:
-        send("Thank you! Now please send the image for diagnosis.", sender, phone_id)
+        send("Thank you! Now you can upload the image for augmented VIA analysis", sender, phone_id)
     
     save_user_state(sender, state)
 
