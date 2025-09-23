@@ -21,12 +21,23 @@ from google.oauth2 import service_account
 
 logging.basicConfig(level=logging.INFO)
 
-# Initialize Redis connection for Upstash
+# Initialize Redis connection for Upstash with proper error handling
 redis_url = os.environ.get("UPSTASH_REDIS_URL")
 redis_token = os.environ.get("UPSTASH_REDIS_TOKEN")
 
+redis_client = None
 if redis_url and redis_token:
     try:
+        # Ensure the URL has the correct scheme
+        if not redis_url.startswith(('redis://', 'rediss://')):
+            if redis_url.startswith('http://'):
+                redis_url = redis_url.replace('http://', 'redis://')
+            elif redis_url.startswith('https://'):
+                redis_url = redis_url.replace('https://', 'rediss://')
+            else:
+                # Assume it's a hostname without scheme
+                redis_url = f"rediss://{redis_url}"
+        
         # Use from_url for better Upstash Redis compatibility
         redis_client = redis.from_url(
             redis_url,
@@ -76,19 +87,42 @@ class VertexAIClient:
     def _setup_credentials(self):
         """Setup Google Cloud credentials"""
         try:
-            if VERTEX_AI_CREDENTIALS_PATH and os.path.exists(VERTEX_AI_CREDENTIALS_PATH):
+            # Try to get credentials from environment variable first
+            creds_path = VERTEX_AI_CREDENTIALS_PATH
+            
+            if creds_path and os.path.exists(creds_path):
                 self.credentials = service_account.Credentials.from_service_account_file(
-                    VERTEX_AI_CREDENTIALS_PATH,
+                    creds_path,
                     scopes=['https://www.googleapis.com/auth/cloud-platform']
                 )
-                logging.info("Vertex AI credentials loaded successfully")
+                logging.info("Vertex AI credentials loaded successfully from file")
             else:
-                # Try using default credentials
-                self.credentials = service_account.Credentials.from_service_account_file(
-                    os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
-                    scopes=['https://www.googleapis.com/auth/cloud-platform']
-                )
-                logging.info("Using default Google Cloud credentials")
+                # Try to get credentials from environment variable (base64 encoded)
+                creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+                if creds_json:
+                    try:
+                        # If it's base64 encoded, decode it
+                        if len(creds_json) > 1000:  # Likely base64 encoded
+                            creds_json = base64.b64decode(creds_json).decode('utf-8')
+                        
+                        import json as json_lib
+                        creds_dict = json_lib.loads(creds_json)
+                        self.credentials = service_account.Credentials.from_service_account_info(
+                            creds_dict,
+                            scopes=['https://www.googleapis.com/auth/cloud-platform']
+                        )
+                        logging.info("Vertex AI credentials loaded from environment variable")
+                    except Exception as e:
+                        logging.error(f"Error loading credentials from environment: {e}")
+                        self.credentials = None
+                else:
+                    # Try using default credentials (for Google Cloud environments)
+                    try:
+                        self.credentials, _ = google.auth.default()
+                        logging.info("Using default Google Cloud credentials")
+                    except Exception as e:
+                        logging.warning(f"Could not get default credentials: {e}")
+                        self.credentials = None
         except Exception as e:
             logging.error(f"Error setting up credentials: {e}")
             self.credentials = None
@@ -97,9 +131,9 @@ class VertexAIClient:
         """Get access token for API requests"""
         if self.credentials:
             try:
-                from google.auth.transport.requests import Request
+                import google.auth.transport.requests
                 if not self.credentials.valid:
-                    self.credentials.refresh(Request())
+                    self.credentials.refresh(google.auth.transport.requests.Request())
                 return self.credentials.token
             except Exception as e:
                 logging.error(f"Error getting access token: {e}")
@@ -131,7 +165,10 @@ vertex_ai_client = None
 if VERTEX_AI_PROJECT and VERTEX_AI_ENDPOINT_ID:
     try:
         vertex_ai_client = VertexAIClient(VERTEX_AI_PROJECT, VERTEX_AI_ENDPOINT_ID, VERTEX_AI_REGION)
-        logging.info("Vertex AI client initialized successfully")
+        if vertex_ai_client.credentials:
+            logging.info("Vertex AI client initialized successfully")
+        else:
+            logging.warning("Vertex AI client initialized but no credentials available")
     except Exception as e:
         logging.error(f"Failed to initialize Vertex AI client: {e}")
         vertex_ai_client = None
@@ -139,7 +176,12 @@ else:
     logging.warning("Vertex AI project or endpoint ID not set, cervical cancer staging disabled")
 
 app = Flask(__name__)
-genai.configure(api_key=gen_api)
+
+# Configure Gemini only if API key is available
+if gen_api:
+    genai.configure(api_key=gen_api)
+else:
+    logging.warning("GEN_API not set, Gemini functionality disabled")
 
 class CustomURLExtract(URLExtract):
     def _get_cache_file_path(self):
@@ -148,25 +190,27 @@ class CustomURLExtract(URLExtract):
 
 extractor = CustomURLExtract(limit=1)
 
-generation_config = {
-    "temperature": 1,
-    "top_p": 0.95,
-    "top_k": 0,
-    "max_output_tokens": 8192,
-}
+# Only create Gemini model if API key is available
+if gen_api:
+    generation_config = {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 0,
+        "max_output_tokens": 8192,
+    }
 
-safety_settings = [
-    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-]
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+    ]
 
-model = genai.GenerativeModel(model_name=model_name,
-                              generation_config=generation_config,
-                              safety_settings=safety_settings)
-
-convo = model.start_chat(history=[])
+    model = genai.GenerativeModel(model_name=model_name,
+                                  generation_config=generation_config,
+                                  safety_settings=safety_settings)
+else:
+    model = None
 
 def save_user_states():
     """Save all user states to Redis"""
@@ -298,6 +342,10 @@ def detect_language(message):
 
 def send(answer, sender, phone_id):
     """Send message via WhatsApp API"""
+    if not wa_token:
+        logging.error("WA_TOKEN not set, cannot send message")
+        return None
+        
     url = f"https://graph.facebook.com/v19.0/{phone_id}/messages"
     headers = {
         'Authorization': f'Bearer {wa_token}',
@@ -334,6 +382,10 @@ def remove(*file_paths):
 
 def download_whatsapp_image(media_id, file_path):
     """Download image from WhatsApp Media API"""
+    if not wa_token:
+        logging.error("WA_TOKEN not set, cannot download image")
+        return False
+        
     try:
         # Step 1: Get the media URL
         media_url = f"https://graph.facebook.com/v19.0/{media_id}"
@@ -729,6 +781,14 @@ def handle_conversation_state(sender, prompt, phone_id, media_id=None, media_typ
         handle_follow_up(sender, prompt, phone_id)
     elif state["step"] == "main_menu":
         # For main menu, use Gemini for general queries
+        if not model:
+            lang = state.get("language", "english")
+            if lang == "shona":
+                send("Ndine urombo, basa reGemini harisi kushanda parizvino. Ndapota edza gare gare.", sender, phone_id)
+            else:
+                send("I'm sorry, the Gemini service is currently unavailable. Please try again later.", sender, phone_id)
+            return
+            
         lang = state.get("language", "english")
         fresh_convo = model.start_chat(history=[])
         try:
@@ -754,6 +814,12 @@ def handle_conversation_state(sender, prompt, phone_id, media_id=None, media_typ
                 send("Ndine urombo, tiri kushandisa traffic yakawanda. Edza zvakare gare gare.", sender, phone_id)
             else:
                 send("Sorry, we're experiencing high traffic. Please try again later.", sender, phone_id)
+        except Exception as e:
+            logging.error(f"Error with Gemini: {e}")
+            if lang == "shona":
+                send("Ndine urombo, pane chakakanganisika. Edza zvakare gare gare.", sender, phone_id)
+            else:
+                send("I'm sorry, something went wrong. Please try again later.", sender, phone_id)
     else:
         # Default to language detection if state is unknown
         state["step"] = "language_detection"
@@ -779,161 +845,84 @@ def message_handler(data, phone_id):
                 "step": "language_detection",
                 "language": "english",
                 "needs_language_confirmation": False,
-                "registered": False,
                 "worker_id": None,
                 "patient_id": None,
-                "conversation_history": []
+                "registered": False
             }
-            save_user_state(sender, user_states[sender])
-            logging.info(f"Created new state for {sender}")
-        else:
-            logging.info(f"Using in-memory state for {sender}: {user_states[sender]['step']}")
+            logging.info(f"Created new state for {sender}: language_detection")
     
-    # Extract message and media
-    prompt = ""
-    media_id = None
-    media_type = None
-    
-    if data["type"] == "text":
+    # Handle different message types
+    if "text" in data:
         prompt = data["text"]["body"]
-        logging.info(f"Text message: {prompt[:100]}...")
-    elif data["type"] == "image":
-        media_type = "image"
-        media_id = data["image"]["id"]
-        prompt = "[Image received]"
-        logging.info(f"Image received with media_id: {media_id}")
-    
-    # Save to conversation history
-    save_user_conversation(sender, "user", prompt if prompt else "[Media message]")
-    
-    # Handle based on current state
-    handle_conversation_state(sender, prompt, phone_id, media_id, media_type)
-    
-    # Daily report and cleanup
-    if db:
-        scheduler.enterabs(report_time.timestamp(), 1, create_report, (phone_id,))
-        scheduler.run(blocking=False)
-        delete_old_chats()
-
-@app.route("/", methods=["GET", "POST"])
-def index():
-    return render_template("connected.html")
-
-@app.route("/webhook", methods=["GET", "POST"])
-def webhook():
-    if request.method == "GET":
-        mode = request.args.get("hub.mode")
-        token = request.args.get("hub.verify_token")
-        challenge = request.args.get("hub.challenge")
-        if mode == "subscribe" and token == "BOT":
-            return challenge, 200
-        else:
-            return "Failed", 403
-    elif request.method == "POST":
-        try:
-            data = request.get_json()
-            logging.info(f"Webhook received: {json.dumps(data, indent=2)}")
-            
-            entry = data["entry"][0]
-            changes = entry["changes"][0]
-            value = changes["value"]
-            
-            # Check if messages exist in the webhook data
-            if "messages" in value:
-                message_data = value["messages"][0]
-                phone_id = value["metadata"]["phone_number_id"]
-                message_handler(message_data, phone_id)
-        except Exception as e:
-            logging.error(f"Error in webhook: {e}")
-        return jsonify({"status": "ok"}), 200
-
-@app.route("/test-image-download/<media_id>", methods=["GET"])
-def test_image_download(media_id):
-    """Test endpoint to debug image download"""
-    try:
-        image_path = f"/tmp/test_{media_id}.jpg"
-        success = download_whatsapp_image(media_id, image_path)
+        logging.info(f"Text message from {sender}: {prompt}")
         
-        if success:
-            file_size = os.path.getsize(image_path)
-            # Clean up
-            remove(image_path)
-            return jsonify({
-                "success": True,
-                "file_size": file_size,
-                "message": f"Image downloaded successfully ({file_size} bytes)"
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "message": "Failed to download image"
-            })
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "message": str(e)
-        })
-
-@app.route("/test-vertex-ai", methods=["GET"])
-def test_vertex_ai():
-    """Test Vertex AI connectivity"""
-    if not vertex_ai_client:
-        return jsonify({"success": False, "message": "Vertex AI client not configured"})
-    
-    try:
-        # Test with a simple prediction
-        test_instance = {"image_bytes": {"b64": "test"}}
-        result = vertex_ai_client.predict([test_instance])
-        return jsonify({
-            "success": True,
-            "vertex_ai_connected": True,
-            "response": result
-        })
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "message": str(e)
-        })
-
-@app.route("/test-redis", methods=["GET"])
-def test_redis():
-    """Test Redis connectivity"""
-    if redis_client:
-        try:
-            # Test basic operations
-            test_key = f"test_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            redis_client.set(test_key, "test_value", ex=10)
-            value = redis_client.get(test_key)
-            
-            # Test state operations
-            test_state = {"step": "test", "language": "english"}
-            redis_client.setex("test_state:123", timedelta(minutes=1), json.dumps(test_state))
-            saved_state = redis_client.get("test_state:123")
-            
-            return jsonify({
-                "status": "success", 
-                "redis_working": value == "test_value",
-                "state_operations": saved_state is not None,
-                "user_states_count": len(user_states)
-            })
-        except Exception as e:
-            return jsonify({"status": "error", "message": str(e)})
+        # Save user message to conversation history
+        save_user_conversation(sender, "user", prompt)
+        
+        # Handle conversation state
+        handle_conversation_state(sender, prompt, phone_id)
+        
+    elif "image" in data:
+        media_id = data["image"]["id"]
+        logging.info(f"Image message from {sender}, media_id: {media_id}")
+        
+        # Save user message to conversation history
+        save_user_conversation(sender, "user", "[IMAGE]")
+        
+        # Handle conversation state with image
+        handle_conversation_state(sender, "", phone_id, media_id=media_id, media_type="image")
+        
     else:
-        return jsonify({"status": "error", "message": "Redis client not initialized"})
+        logging.warning(f"Unhandled message type from {sender}: {data.keys()}")
+        send("I'm sorry, I can only process text and image messages at the moment.", sender, phone_id)
 
-@app.route("/user-states", methods=["GET"])
-def get_user_states():
-    """Get current user states for debugging"""
-    return jsonify({
-        "user_states": user_states,
-        "redis_connected": redis_client is not None,
-        "vertex_ai_connected": vertex_ai_client is not None
-    })
+@app.route("/", methods=["GET"])
+def home():
+    return render_template("index.html")
+
+@app.route("/webhook", methods=["GET"])
+def webhook_get():
+    if request.args.get("hub.verify_token") == "Rudo":
+        return request.args.get("hub.challenge")
+    return "Authentication failed. Invalid Token."
+
+@app.route("/webhook", methods=["POST"])
+def webhook_post():
+    try:
+        data = request.get_json()
+        logging.info(f"Received webhook data: {data}")
+        
+        if data.get("object") == "whatsapp_business_account":
+            for entry in data.get("entry", []):
+                for change in entry.get("changes", []):
+                    value = change.get("value", {})
+                    if "messages" in value:
+                        for message in value["messages"]:
+                            message_handler(message, phone_id)
+        
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        logging.error(f"Error in webhook: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route("/health", methods=["GET"])
+def health_check():
+    """Health check endpoint"""
+    status = {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "services": {
+            "redis": redis_client is not None,
+            "gemini": model is not None,
+            "vertex_ai": vertex_ai_client is not None,
+            "whatsapp": bool(wa_token and phone_id)
+        }
+    }
+    return jsonify(status)
+
+# Load user states on startup
+load_user_states()
 
 if __name__ == "__main__":
-    # Load states at startup
-    load_user_states()
-    logging.info(f"Application started with {len(user_states)} loaded user states")
-    logging.info(f"Vertex AI client: {'Connected' if vertex_ai_client else 'Not connected'}")
-    logging.info(f"Redis client: {'Connected' if redis_client else 'Not connected'}")
-    app.run(debug=True, port=8000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
