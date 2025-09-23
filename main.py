@@ -384,6 +384,42 @@ def download_image(url, file_path):
         logging.error(f"Error downloading image: {e}")
         return False
 
+def download_whatsapp_media(media_id, file_path):
+    """Download WhatsApp media by media_id using the Graph API."""
+    try:
+        if not media_id:
+            logging.error("download_whatsapp_media called with empty media_id")
+            return False
+
+        headers = {
+            'Authorization': f'Bearer {wa_token}'
+        }
+
+        # Step 1: Get media metadata to retrieve the actual CDN URL
+        meta_url = f"https://graph.facebook.com/v19.0/{media_id}"
+        logging.info(f"Fetching media metadata for media_id={media_id}")
+        meta_resp = requests.get(meta_url, headers=headers, timeout=20)
+        meta_resp.raise_for_status()
+        media_data = meta_resp.json()
+
+        media_url = media_data.get("url")
+        if not media_url:
+            logging.error(f"No media URL found for media_id={media_id}. Response: {media_data}")
+            return False
+
+        # Step 2: Download the media bytes from the returned URL
+        logging.info(f"Downloading media content from URL for media_id={media_id}")
+        media_resp = requests.get(media_url, headers=headers, timeout=60)
+        media_resp.raise_for_status()
+
+        with open(file_path, 'wb') as f:
+            f.write(media_resp.content)
+
+        logging.info(f"Media saved to {file_path} for media_id={media_id}")
+        return True
+    except Exception as e:
+        logging.error(f"Error downloading WhatsApp media (media_id={media_id}): {e}")
+        return False
 def stage_cervical_cancer(image_path):
     """Stage cervical cancer using Vertex AI dedicated endpoint with MedSigLip model"""
     if not vertex_ai_client:
@@ -630,7 +666,7 @@ def handle_patient_id(sender, prompt, phone_id):
     
     save_user_state(sender, state)
 
-def handle_cervical_image(sender, image_url, phone_id):
+def handle_cervical_image(sender, media_id, phone_id):
     """Handle cervical cancer image for staging using MedSigLip model"""
     state = user_states[sender]
     lang = state["language"]
@@ -643,7 +679,8 @@ def handle_cervical_image(sender, image_url, phone_id):
     else:
         send("I've received your image. Please wait while I analyze it using the MedSigLip model.", sender, phone_id)
     
-    if download_image(image_url, image_path):
+    # For WhatsApp, the incoming "image" contains a media ID, not a direct URL
+    if download_whatsapp_media(media_id, image_path):
         # Stage the cervical cancer using MedSigLip model
         result = stage_cervical_cancer(image_path)
         
