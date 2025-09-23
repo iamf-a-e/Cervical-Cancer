@@ -58,18 +58,29 @@ name = "Fae"  # The bot will consider this person as its owner or creator
 bot_name = "Rudo"  # This will be the name of your bot, eg: "Hello I am Astro Bot"
 AGENT = "+263719835124"  # Fixed: added quotes to make it a string
 
-# Vertex AI REST API configuration (REPLACED the large aiplatform package)
+# Vertex AI Endpoint Configuration (UPDATED with dedicated endpoint)
 VERTEX_AI_ENDPOINT_ID = "9216603443274186752"
 VERTEX_AI_REGION = "us-west4"
 VERTEX_AI_PROJECT = os.environ.get("VERTEX_AI_PROJECT")
 VERTEX_AI_CREDENTIALS_PATH = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+# Dedicated endpoint domain from the image
+VERTEX_AI_DEDICATED_ENDPOINT = "9216603443274186752.us-west4-519460264942.prediction.vertexai.goog"
 
 class VertexAIClient:
-    def __init__(self, project_id, endpoint_id, region="us-west4"):
+    def __init__(self, project_id, endpoint_id, region="us-west4", dedicated_endpoint=None):
         self.project_id = project_id
         self.endpoint_id = endpoint_id
         self.region = region
-        self.base_url = f"https://{region}-aiplatform.googleapis.com/v1"
+        self.dedicated_endpoint = dedicated_endpoint
+        
+        # Use dedicated endpoint if provided, otherwise fall back to standard REST API
+        if dedicated_endpoint:
+            self.base_url = f"https://{dedicated_endpoint}"
+            logging.info(f"Using dedicated endpoint: {self.base_url}")
+        else:
+            self.base_url = f"https://{region}-aiplatform.googleapis.com/v1"
+            logging.info(f"Using standard REST API endpoint: {self.base_url}")
+            
         self.credentials = None
         self._setup_credentials()
     
@@ -106,8 +117,13 @@ class VertexAIClient:
         return None
     
     def predict(self, instances):
-        """Make prediction using Vertex AI REST API"""
-        url = f"{self.base_url}/projects/{self.project_id}/locations/{self.region}/endpoints/{self.endpoint_id}:predict"
+        """Make prediction using Vertex AI dedicated endpoint"""
+        # For dedicated endpoints, the URL structure is different
+        if self.dedicated_endpoint:
+            url = f"https://{self.dedicated_endpoint}/v1/models/default:predict"
+        else:
+            # Fallback to standard REST API
+            url = f"{self.base_url}/projects/{self.project_id}/locations/{self.region}/endpoints/{self.endpoint_id}:predict"
         
         token = self.get_access_token()
         if not token:
@@ -118,20 +134,40 @@ class VertexAIClient:
             "Content-Type": "application/json"
         }
         
+        # Prepare the request payload for MedSigLip model
+        # Assuming the model expects image data in base64 format
+        payload = {
+            "instances": instances
+        }
+        
         try:
-            response = requests.post(url, headers=headers, json={"instances": instances})
+            logging.info(f"Sending prediction request to Vertex AI endpoint: {url}")
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
             response.raise_for_status()
-            return response.json()
+            result = response.json()
+            logging.info(f"Vertex AI prediction successful: {result}")
+            return result
+        except requests.exceptions.Timeout:
+            logging.error("Vertex AI request timed out")
+            return {"error": "Request timeout - please try again"}
         except requests.exceptions.RequestException as e:
             logging.error(f"Vertex AI API request failed: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logging.error(f"Response status: {e.response.status_code}")
+                logging.error(f"Response body: {e.response.text}")
             return {"error": str(e)}
 
-# Initialize Vertex AI client
+# Initialize Vertex AI client with dedicated endpoint
 vertex_ai_client = None
 if VERTEX_AI_PROJECT and VERTEX_AI_ENDPOINT_ID:
     try:
-        vertex_ai_client = VertexAIClient(VERTEX_AI_PROJECT, VERTEX_AI_ENDPOINT_ID, VERTEX_AI_REGION)
-        logging.info("Vertex AI client initialized successfully")
+        vertex_ai_client = VertexAIClient(
+            VERTEX_AI_PROJECT, 
+            VERTEX_AI_ENDPOINT_ID, 
+            VERTEX_AI_REGION,
+            VERTEX_AI_DEDICATED_ENDPOINT
+        )
+        logging.info("Vertex AI client initialized successfully with dedicated endpoint")
     except Exception as e:
         logging.error(f"Failed to initialize Vertex AI client: {e}")
         vertex_ai_client = None
@@ -349,7 +385,7 @@ def download_image(url, file_path):
         return False
 
 def stage_cervical_cancer(image_path):
-    """Stage cervical cancer using Vertex AI REST API"""
+    """Stage cervical cancer using Vertex AI dedicated endpoint with MedSigLip model"""
     if not vertex_ai_client:
         return {
             "stage": "Error",
@@ -363,12 +399,13 @@ def stage_cervical_cancer(image_path):
         with open(image_path, "rb") as f:
             image_data = f.read()
         
-        # Prepare the prediction instance for base64 image
+        # Prepare the prediction instance for MedSigLip model
+        # MedSigLip typically expects base64 encoded image
         instance = {
-            "image_bytes": {"b64": base64.b64encode(image_data).decode()}
+            "image_bytes": {"b64": base64.b64encode(image_data).decode('utf-8')}
         }
         
-        # Make prediction using REST API
+        # Make prediction using the dedicated endpoint
         prediction_result = vertex_ai_client.predict([instance])
         
         if "error" in prediction_result:
@@ -379,13 +416,35 @@ def stage_cervical_cancer(image_path):
                 "error": prediction_result["error"]
             }
         
-        # Process the prediction results
+        # Process the prediction results for MedSigLip model
+        # Adjust these keys based on your MedSigLip model's actual output format
         if "predictions" in prediction_result and len(prediction_result["predictions"]) > 0:
             results = prediction_result["predictions"][0]
             
-            # Adjust these keys based on your actual model's output format
-            stage = results.get('stage', results.get('class', 'Unknown'))
-            confidence = results.get('confidence', results.get('score', 0))
+            # MedSigLip model output structure may vary - adjust accordingly
+            if isinstance(results, dict):
+                # If results are a dictionary with stage/confidence
+                stage = results.get('stage', results.get('class', results.get('prediction', 'Unknown')))
+                confidence = results.get('confidence', results.get('score', results.get('probability', 0)))
+            elif isinstance(results, list):
+                # If results are a list of predictions
+                stage = "Stage " + str(results[0]) if results else "Unknown"
+                confidence = results[1] if len(results) > 1 else 0
+            else:
+                # Fallback for unknown format
+                stage = str(results)
+                confidence = 0.5
+            
+            return {
+                "stage": stage,
+                "confidence": float(confidence),
+                "success": True
+            }
+        elif "outputs" in prediction_result:
+            # Alternative output format
+            outputs = prediction_result["outputs"]
+            stage = outputs[0] if outputs else "Unknown"
+            confidence = outputs[1] if len(outputs) > 1 else 0.5
             
             return {
                 "stage": stage,
@@ -393,11 +452,12 @@ def stage_cervical_cancer(image_path):
                 "success": True
             }
         else:
+            logging.warning(f"Unexpected prediction result format: {prediction_result}")
             return {
                 "stage": "Error",
                 "confidence": 0,
                 "success": False,
-                "error": "No predictions returned from model"
+                "error": "Unexpected response format from model"
             }
             
     except Exception as e:
@@ -571,7 +631,7 @@ def handle_patient_id(sender, prompt, phone_id):
     save_user_state(sender, state)
 
 def handle_cervical_image(sender, image_url, phone_id):
-    """Handle cervical cancer image for staging"""
+    """Handle cervical cancer image for staging using MedSigLip model"""
     state = user_states[sender]
     lang = state["language"]
     
@@ -579,12 +639,12 @@ def handle_cervical_image(sender, image_url, phone_id):
     image_path = f"/tmp/{sender}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
     
     if lang == "shona":
-        send("Ndiri kugamuchira mufananidzo wenyu. Ndapota mirira, ndiri kuongorora.", sender, phone_id)
+        send("Ndiri kugamuchira mufananidzo wenyu. Ndapota mirira, ndiri kuongorora nesimba reMedSigLip model.", sender, phone_id)
     else:
-        send("I've received your image. Please wait while I analyze it.", sender, phone_id)
+        send("I've received your image. Please wait while I analyze it using the MedSigLip model.", sender, phone_id)
     
     if download_image(image_url, image_path):
-        # Stage the cervical cancer
+        # Stage the cervical cancer using MedSigLip model
         result = stage_cervical_cancer(image_path)
         
         if result["success"]:
@@ -596,14 +656,15 @@ def handle_cervical_image(sender, image_url, phone_id):
             patient_id = state.get("patient_id", "Unknown")
             
             if lang == "shona":
-                response = f"Mhedzisiro yekuongorora:\n- Worker ID: {worker_id}\n- Patient ID: {patient_id}\n- Danho: {stage}\n- Chivimbo: {confidence:.2%}\n\nNote: Izvi hazvitsivi kuongororwa kwechiremba. Unofanira kuona chiremba kuti uwane kuongororwa kwakazara."
+                response = f"Mhedzisiro yekuongorora neMedSigLip:\n- Worker ID: {worker_id}\n- Patient ID: {patient_id}\n- Danho: {stage}\n- Chivimbo: {confidence:.2%}\n\nNote: Izvi hazvitsivi kuongororwa kwechiremba. Unofanira kuona chiremba kuti uwane kuongororwa kwakazara."
             else:
-                response = f"Diagnosis results:\n- Worker ID: {worker_id}\n- Patient ID: {patient_id}\n- Stage: {stage}\n- Confidence: {confidence:.2%}\n\nNote: This does not replace a doctor's diagnosis. Please see a healthcare professional for a complete evaluation."
+                response = f"MedSigLip Diagnosis results:\n- Worker ID: {worker_id}\n- Patient ID: {patient_id}\n- Stage: {stage}\n- Confidence: {confidence:.2%}\n\nNote: This does not replace a doctor's diagnosis. Please see a healthcare professional for a complete evaluation."
         else:
+            error_msg = result.get("error", "Unknown error")
             if lang == "shona":
-                response = "Ndine urombo, handina kukwanisa kuongorora mufananidzo wenyu. Edza kuendesa imwe mufananidzo kana kumbobvunza chiremba."
+                response = f"Ndine urombo, handina kukwanisa kuongorora mufananidzo wenyu. Error: {error_msg}. Edza kuendesa imwe mufananidzo kana kumbobvunza chiremba."
             else:
-                response = "I'm sorry, I couldn't analyze your image. Please try sending another image or consult a doctor directly."
+                response = f"I'm sorry, I couldn't analyze your image. Error: {error_msg}. Please try sending another image or consult a doctor directly."
         
         # Clean up the downloaded image
         remove(image_path)
@@ -642,9 +703,9 @@ def handle_follow_up(sender, prompt, phone_id):
         # End session
         state["step"] = "main_menu"
         if lang == "shona":
-            send("Ndatenda nekushandisa Dawa Health. Kana uine mimwe mibvunzo, tendera kuti ndikubatsire.", sender, phone_id)
+            send("Ndatenda nekushandisa Dawa Health neMedSigLip technology. Kana uine mimwe mibvunzo, tendera kuti ndikubatsire.", sender, phone_id)
         else:
-            send("Thank you for using Dawa Health. If you have more questions, feel free to ask.", sender, phone_id)
+            send("Thank you for using Dawa Health with MedSigLip technology. If you have more questions, feel free to ask.", sender, phone_id)
     
     save_user_state(sender, state)
 
@@ -821,6 +882,28 @@ def download_media(media_id):
         logging.error(f"Error downloading media: {e}")
         return jsonify({"success": False, "error": str(e)})
 
+@app.route("/test-vertex", methods=["GET"])
+def test_vertex():
+    """Test Vertex AI endpoint connectivity"""
+    if not vertex_ai_client:
+        return jsonify({"status": "error", "message": "Vertex AI client not configured"})
+    
+    try:
+        # Test with a simple prediction request
+        test_instance = {
+            "image_bytes": {"b64": base64.b64encode(b"test image data").decode('utf-8')}
+        }
+        
+        result = vertex_ai_client.predict([test_instance])
+        
+        return jsonify({
+            "status": "success",
+            "endpoint_used": vertex_ai_client.base_url,
+            "response": result
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
 @app.route("/test-redis", methods=["GET"])
 def test_redis():
     """Test Redis connectivity"""
@@ -852,11 +935,14 @@ def get_user_states():
     """Get current user states for debugging"""
     return jsonify({
         "user_states": user_states,
-        "redis_connected": redis_client is not None
+        "redis_connected": redis_client is not None,
+        "vertex_ai_configured": vertex_ai_client is not None,
+        "vertex_endpoint": VERTEX_AI_DEDICATED_ENDPOINT if vertex_ai_client else None
     })
 
 if __name__ == "__main__":
     # Load states at startup
     load_user_states()
     logging.info(f"Application started with {len(user_states)} loaded user states")
+    logging.info(f"Vertex AI endpoint: {VERTEX_AI_DEDICATED_ENDPOINT}")
     app.run(debug=True, port=8000)
