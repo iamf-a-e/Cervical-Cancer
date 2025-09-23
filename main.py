@@ -333,49 +333,116 @@ def remove(*file_paths):
             os.remove(file)
 
 def download_whatsapp_image(media_id, file_path):
-    """Download image from WhatsApp Media API"""
+    """Download an image from WhatsApp using the media ID."""
     try:
-        # Step 1: Get the media URL
-        media_url = f"https://graph.facebook.com/v19.0/{media_id}"
+        # Step 1: Resolve media ID to a media URL via Graph API
+        meta_url = f"https://graph.facebook.com/v19.0/{media_id}"
         headers = {
             'Authorization': f'Bearer {wa_token}'
         }
-        
-        logging.info(f"Getting media URL for media_id: {media_id}")
-        response = requests.get(media_url, headers=headers)
-        response.raise_for_status()
-        media_data = response.json()
-        
-        # Step 2: Download the actual image content
-        download_url = media_data.get('url')
-        if not download_url:
-            logging.error(f"No download URL found in media data: {media_data}")
+        meta_resp = requests.get(meta_url, headers=headers)
+        meta_resp.raise_for_status()
+        media_data = meta_resp.json()
+        direct_url = media_data.get("url")
+        if not direct_url:
+            logging.error("No direct URL returned for media ID")
             return False
-            
-        logging.info(f"Downloading image from: {download_url}")
-        download_response = requests.get(download_url, headers=headers)
-        download_response.raise_for_status()
-        
-        # Step 3: Save the image
+
+        # Step 2: Download the actual media binary
+        bin_resp = requests.get(direct_url, headers=headers)
+        bin_resp.raise_for_status()
         with open(file_path, 'wb') as f:
-            f.write(download_response.content)
-        
-        # Verify the file was created and has content
-        if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-            logging.info(f"Image successfully downloaded to {file_path} ({os.path.getsize(file_path)} bytes)")
-            return True
-        else:
-            logging.error(f"Downloaded file is empty or doesn't exist: {file_path}")
-            return False
-            
+            f.write(bin_resp.content)
+        logging.debug(f"Image downloaded to {file_path}")
+        return True
     except Exception as e:
         logging.error(f"Error downloading WhatsApp image: {e}")
         return False
 
-def stage_cervical_cancer(image_path):
-    """Stage cervical cancer using Vertex AI REST API"""
+def _predict_with_medsiglip(image_b64):
+    """Call the Vertex AI endpoint for MedSigLip with several schema fallbacks."""
     if not vertex_ai_client:
-        logging.error("Vertex AI client not configured")
+        return {"error": "Vertex AI client not configured"}
+
+    # Candidate instance payloads commonly used by image endpoints
+    candidate_instances = [
+        {"image_bytes": {"b64": image_b64}},
+        {"content": image_b64},
+        {"image": {"bytesBase64Encoded": image_b64}},
+        {"mimeType": "image/jpeg", "content": image_b64},
+    ]
+
+    last_error = None
+    for instance in candidate_instances:
+        result = vertex_ai_client.predict([instance])
+        if isinstance(result, dict) and "predictions" in result:
+            return result
+        # Some custom containers may return 200 with different keys
+        if isinstance(result, dict) and ("error" not in result):
+            return result
+        last_error = result.get("error") if isinstance(result, dict) else str(result)
+    return {"error": last_error or "Prediction failed for all payload formats"}
+
+
+def _parse_medsiglip_prediction(prediction_payload):
+    """Parse stage and confidence from a variety of possible prediction shapes."""
+    try:
+        # Standard path
+        predictions = prediction_payload.get("predictions", prediction_payload)
+        if isinstance(predictions, dict):
+            predictions = [predictions]
+        if not predictions or not isinstance(predictions, list):
+            return None
+
+        pred = predictions[0]
+
+        # Try direct keys
+        stage = (
+            pred.get("stage")
+            or pred.get("staging")
+            or pred.get("class")
+            or pred.get("label")
+        )
+
+        confidence = (
+            pred.get("confidence")
+            or pred.get("score")
+            or (pred.get("scores", [None]) or [None])[0]
+            or (pred.get("probabilities", [None]) or [None])[0]
+            or (pred.get("confidences", [None]) or [None])[0]
+        )
+
+        # AutoML-style
+        if not stage and ("displayNames" in pred or "classes" in pred):
+            labels = pred.get("displayNames") or pred.get("classes") or []
+            probs = pred.get("confidences") or pred.get("scores") or []
+            if labels:
+                stage = labels[0]
+                confidence = probs[0] if probs else confidence
+
+        # Generic label/score arrays
+        if not stage and "labels" in pred and isinstance(pred["labels"], list):
+            stage = pred["labels"][0]
+            if "scores" in pred and isinstance(pred["scores"], list) and pred["scores"]:
+                confidence = pred["scores"][0]
+
+        # Normalize values
+        if stage is None:
+            stage = "Unknown"
+        try:
+            confidence = float(confidence) if confidence is not None else 0.0
+        except Exception:
+            confidence = 0.0
+
+        return {"stage": str(stage), "confidence": confidence}
+    except Exception as e:
+        logging.error(f"Error parsing MedSigLip prediction: {e}")
+        return None
+
+
+def stage_cervical_cancer(image_path):
+    """Stage cervical cancer using the MedSigLip Vertex AI endpoint."""
+    if not vertex_ai_client:
         return {
             "stage": "Error",
             "confidence": 0,
@@ -384,46 +451,15 @@ def stage_cervical_cancer(image_path):
         }
     
     try:
-        # Verify the image exists and has content
-        if not os.path.exists(image_path):
-            logging.error(f"Image file does not exist: {image_path}")
-            return {
-                "stage": "Error",
-                "confidence": 0,
-                "success": False,
-                "error": "Image file does not exist"
-            }
-        
-        file_size = os.path.getsize(image_path)
-        if file_size == 0:
-            logging.error(f"Image file is empty: {image_path}")
-            return {
-                "stage": "Error",
-                "confidence": 0,
-                "success": False,
-                "error": "Image file is empty"
-            }
-        
-        logging.info(f"Processing image: {image_path} ({file_size} bytes)")
-        
         # Read and encode the image
         with open(image_path, "rb") as f:
             image_data = f.read()
-        
-        # Prepare the prediction instance for base64 image
-        instance = {
-            "image_bytes": {"b64": base64.b64encode(image_data).decode()}
-        }
-        
-        logging.info("Sending request to Vertex AI endpoint...")
-        
-        # Make prediction using REST API
-        prediction_result = vertex_ai_client.predict([instance])
-        
-        logging.info(f"Vertex AI response: {prediction_result}")
+        image_b64 = base64.b64encode(image_data).decode()
+
+        # Make prediction using REST API with fallbacks
+        prediction_result = _predict_with_medsiglip(image_b64)
         
         if "error" in prediction_result:
-            logging.error(f"Vertex AI error: {prediction_result['error']}")
             return {
                 "stage": "Error",
                 "confidence": 0,
@@ -431,29 +467,20 @@ def stage_cervical_cancer(image_path):
                 "error": prediction_result["error"]
             }
         
-        # Process the prediction results
-        if "predictions" in prediction_result and len(prediction_result["predictions"]) > 0:
-            results = prediction_result["predictions"][0]
-            
-            # Adjust these keys based on your actual model's output format
-            stage = results.get('stage', results.get('class', 'Unknown'))
-            confidence = results.get('confidence', results.get('score', 0))
-            
-            logging.info(f"Prediction successful: Stage={stage}, Confidence={confidence}")
-            
-            return {
-                "stage": stage,
-                "confidence": float(confidence),
-                "success": True
-            }
-        else:
-            logging.error("No predictions returned from model")
+        parsed = _parse_medsiglip_prediction(prediction_result)
+        if parsed is None:
             return {
                 "stage": "Error",
                 "confidence": 0,
                 "success": False,
-                "error": "No predictions returned from model"
+                "error": "Unrecognized prediction response format"
             }
+
+        return {
+            "stage": parsed["stage"],
+            "confidence": float(parsed["confidence"]),
+            "success": True
+        }
             
     except Exception as e:
         logging.error(f"Error in cervical cancer staging: {e}")
@@ -625,7 +652,11 @@ def handle_patient_id(sender, prompt, phone_id):
     
     save_user_state(sender, state)
 
-def handle_cervical_image(sender, media_id, phone_id):
+def _looks_like_url(value):
+    return isinstance(value, str) and value.startswith("http")
+
+
+def handle_cervical_image(sender, image_ref, phone_id):
     """Handle cervical cancer image for staging"""
     state = user_states[sender]
     lang = state["language"]
@@ -638,8 +669,24 @@ def handle_cervical_image(sender, media_id, phone_id):
     else:
         send("I've received your image. Please wait while I analyze it.", sender, phone_id)
     
-    # Download the image from WhatsApp
-    if download_whatsapp_image(media_id, image_path):
+    downloaded = False
+    if _looks_like_url(image_ref):
+        # Legacy path: direct URL (rare for WhatsApp inbound)
+        try:
+            headers = {'Authorization': f'Bearer {wa_token}'}
+            resp = requests.get(image_ref, headers=headers)
+            resp.raise_for_status()
+            with open(image_path, 'wb') as f:
+                f.write(resp.content)
+            downloaded = True
+        except Exception as e:
+            logging.error(f"Direct URL download failed: {e}")
+            downloaded = False
+    else:
+        # Preferred path: media ID via Graph API
+        downloaded = download_whatsapp_image(image_ref, image_path)
+
+    if downloaded:
         # Stage the cervical cancer
         result = stage_cervical_cancer(image_path)
         
@@ -656,11 +703,10 @@ def handle_cervical_image(sender, media_id, phone_id):
             else:
                 response = f"Diagnosis results:\n- Worker ID: {worker_id}\n- Patient ID: {patient_id}\n- Stage: {stage}\n- Confidence: {confidence:.2%}\n\nNote: This does not replace a doctor's diagnosis. Please see a healthcare professional for a complete evaluation."
         else:
-            error_msg = result.get("error", "Unknown error")
             if lang == "shona":
-                response = f"Ndine urombo, handina kukwanisa kuongorora mufananidzo wenyu. Error: {error_msg}. Edza kuendesa imwe mufananidzo kana kumbobvunza chiremba."
+                response = "Ndine urombo, handina kukwanisa kuongorora mufananidzo wenyu. Edza kuendesa imwe mufananidzo kana kumbobvunza chiremba."
             else:
-                response = f"I'm sorry, I couldn't analyze your image. Error: {error_msg}. Please try sending another image or consult a doctor directly."
+                response = "I'm sorry, I couldn't analyze your image. Please try sending another image or consult a doctor directly."
         
         # Clean up the downloaded image
         remove(image_path)
@@ -705,7 +751,7 @@ def handle_follow_up(sender, prompt, phone_id):
     
     save_user_state(sender, state)
 
-def handle_conversation_state(sender, prompt, phone_id, media_id=None, media_type=None):
+def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_type=None):
     """Handle conversation based on current state"""
     state = user_states.get(sender)
     if not state:
@@ -716,7 +762,7 @@ def handle_conversation_state(sender, prompt, phone_id, media_id=None, media_typ
     
     # Check if we have an image for cervical cancer staging
     if media_type == "image" and state["step"] == "awaiting_image":
-        handle_cervical_image(sender, media_id, phone_id)
+        handle_cervical_image(sender, media_url, phone_id)
         return
     
     if state["step"] == "language_detection":
@@ -791,7 +837,7 @@ def message_handler(data, phone_id):
     
     # Extract message and media
     prompt = ""
-    media_id = None
+    media_url = None
     media_type = None
     
     if data["type"] == "text":
@@ -799,15 +845,16 @@ def message_handler(data, phone_id):
         logging.info(f"Text message: {prompt[:100]}...")
     elif data["type"] == "image":
         media_type = "image"
-        media_id = data["image"]["id"]
+        # For WhatsApp, capture the media ID and download via Graph API
+        media_url = data["image"].get("id") or data["image"].get("link")
         prompt = "[Image received]"
-        logging.info(f"Image received with media_id: {media_id}")
+        logging.info(f"Image received: {media_url}")
     
     # Save to conversation history
     save_user_conversation(sender, "user", prompt if prompt else "[Media message]")
     
     # Handle based on current state
-    handle_conversation_state(sender, prompt, phone_id, media_id, media_type)
+    handle_conversation_state(sender, prompt, phone_id, media_url, media_type)
     
     # Daily report and cleanup
     if db:
@@ -847,53 +894,35 @@ def webhook():
             logging.error(f"Error in webhook: {e}")
         return jsonify({"status": "ok"}), 200
 
-@app.route("/test-image-download/<media_id>", methods=["GET"])
-def test_image_download(media_id):
-    """Test endpoint to debug image download"""
+@app.route("/download_media/<media_id>", methods=["GET"])
+def download_media(media_id):
+    """Endpoint to download media from WhatsApp"""
     try:
-        image_path = f"/tmp/test_{media_id}.jpg"
-        success = download_whatsapp_image(media_id, image_path)
+        url = f"https://graph.facebook.com/v19.0/{media_id}"
+        headers = {
+            'Authorization': f'Bearer {wa_token}'
+        }
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        media_data = response.json()
         
-        if success:
-            file_size = os.path.getsize(image_path)
-            # Clean up
-            remove(image_path)
-            return jsonify({
-                "success": True,
-                "file_size": file_size,
-                "message": f"Image downloaded successfully ({file_size} bytes)"
-            })
+        # Download the actual media content
+        media_url = media_data.get("url")
+        if media_url:
+            media_response = requests.get(media_url, headers=headers)
+            media_response.raise_for_status()
+            
+            # Save the media to a temporary file
+            media_path = f"/tmp/{media_id}.jpg"
+            with open(media_path, 'wb') as f:
+                f.write(media_response.content)
+            
+            return jsonify({"success": True, "path": media_path})
         else:
-            return jsonify({
-                "success": False,
-                "message": "Failed to download image"
-            })
+            return jsonify({"success": False, "error": "No URL found in media data"})
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "message": str(e)
-        })
-
-@app.route("/test-vertex-ai", methods=["GET"])
-def test_vertex_ai():
-    """Test Vertex AI connectivity"""
-    if not vertex_ai_client:
-        return jsonify({"success": False, "message": "Vertex AI client not configured"})
-    
-    try:
-        # Test with a simple prediction
-        test_instance = {"image_bytes": {"b64": "test"}}
-        result = vertex_ai_client.predict([test_instance])
-        return jsonify({
-            "success": True,
-            "vertex_ai_connected": True,
-            "response": result
-        })
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "message": str(e)
-        })
+        logging.error(f"Error downloading media: {e}")
+        return jsonify({"success": False, "error": str(e)})
 
 @app.route("/test-redis", methods=["GET"])
 def test_redis():
@@ -926,14 +955,11 @@ def get_user_states():
     """Get current user states for debugging"""
     return jsonify({
         "user_states": user_states,
-        "redis_connected": redis_client is not None,
-        "vertex_ai_connected": vertex_ai_client is not None
+        "redis_connected": redis_client is not None
     })
 
 if __name__ == "__main__":
     # Load states at startup
     load_user_states()
     logging.info(f"Application started with {len(user_states)} loaded user states")
-    logging.info(f"Vertex AI client: {'Connected' if vertex_ai_client else 'Not connected'}")
-    logging.info(f"Redis client: {'Connected' if redis_client else 'Not connected'}")
     app.run(debug=True, port=8000)
