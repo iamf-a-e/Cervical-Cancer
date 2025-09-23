@@ -1,5 +1,5 @@
 import google.generativeai as genai
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template_string
 import requests
 import os
 import fitz
@@ -12,7 +12,6 @@ from sqlalchemy import create_engine, Column, Integer, String, DateTime, func
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from google.api_core.exceptions import ResourceExhausted
-from training import products, instructions, cervical_cancer_data
 import redis
 import json
 import re
@@ -118,6 +117,7 @@ class VertexAIClient:
                 else:
                     # Try using default credentials (for Google Cloud environments)
                     try:
+                        import google.auth
                         self.credentials, _ = google.auth.default()
                         logging.info("Using default Google Cloud credentials")
                     except Exception as e:
@@ -876,18 +876,76 @@ def message_handler(data, phone_id):
         logging.warning(f"Unhandled message type from {sender}: {data.keys()}")
         send("I'm sorry, I can only process text and image messages at the moment.", sender, phone_id)
 
+# Simple HTML template as string
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Rudo - Dawa Health Bot</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; background-color: #f5f5f5; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #2c3e50; }
+        .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .healthy { background-color: #d4edda; color: #155724; }
+        .unhealthy { background-color: #f8d7da; color: #721c24; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 Rudo - Dawa Health Bot</h1>
+        <p>WhatsApp chatbot for cervical cancer screening assistance</p>
+        
+        <h2>Service Status</h2>
+        <div class="status {{ 'healthy' if services.redis else 'unhealthy' }}">
+            Redis: {{ 'Connected' if services.redis else 'Not Connected' }}
+        </div>
+        <div class="status {{ 'healthy' if services.gemini else 'unhealthy' }}">
+            Gemini: {{ 'Connected' if services.gemini else 'Not Connected' }}
+        </div>
+        <div class="status {{ 'healthy' if services.vertex_ai else 'unhealthy' }}">
+            Vertex AI: {{ 'Connected' if services.vertex_ai else 'Not Connected' }}
+        </div>
+        <div class="status {{ 'healthy' if services.whatsapp else 'unhealthy' }}">
+            WhatsApp: {{ 'Connected' if services.whatsapp else 'Not Connected' }}
+        </div>
+        
+        <h2>Endpoints</h2>
+        <ul>
+            <li><a href="/health">/health</a> - Health check</li>
+            <li><a href="/webhook">/webhook</a> - WhatsApp webhook</li>
+        </ul>
+        
+        <p><em>Last updated: {{ timestamp }}</em></p>
+    </div>
+</body>
+</html>
+"""
+
 @app.route("/", methods=["GET"])
 def home():
-    return render_template("index.html")
+    """Home page with service status"""
+    services = {
+        "redis": redis_client is not None,
+        "gemini": model is not None,
+        "vertex_ai": vertex_ai_client is not None,
+        "whatsapp": bool(wa_token and phone_id)
+    }
+    
+    return render_template_string(HTML_TEMPLATE, 
+                                services=services,
+                                timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
 @app.route("/webhook", methods=["GET"])
 def webhook_get():
+    """WhatsApp webhook verification"""
     if request.args.get("hub.verify_token") == "Rudo":
         return request.args.get("hub.challenge")
     return "Authentication failed. Invalid Token."
 
 @app.route("/webhook", methods=["POST"])
 def webhook_post():
+    """WhatsApp webhook for receiving messages"""
     try:
         data = request.get_json()
         logging.info(f"Received webhook data: {data}")
@@ -916,7 +974,8 @@ def health_check():
             "gemini": model is not None,
             "vertex_ai": vertex_ai_client is not None,
             "whatsapp": bool(wa_token and phone_id)
-        }
+        },
+        "user_states_count": len(user_states)
     }
     return jsonify(status)
 
@@ -925,4 +984,6 @@ load_user_states()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
+    logging.info(f"Starting Rudo bot on port {port}")
+    logging.info(f"Loaded {len(user_states)} user states from Redis")
     app.run(host="0.0.0.0", port=port, debug=False)
