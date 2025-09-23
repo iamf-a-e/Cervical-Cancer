@@ -21,22 +21,31 @@ from google.oauth2 import service_account
 
 logging.basicConfig(level=logging.INFO)
 
-# Initialize Redis connection
-redis_url = os.environ.get("REDIS_URL")
-if redis_url:
+# Initialize Redis connection for Upstash
+redis_url = os.environ.get("UPSTASH_REDIS_URL")
+redis_token = os.environ.get("UPSTASH_REDIS_TOKEN")
+
+if redis_url and redis_token:
     try:
-        redis_client = redis.from_url(redis_url)
+        # For Upstash Redis, we need to include the token in the connection
+        redis_client = redis.Redis(
+            host=redis_url.replace("redis://", "").split(":")[0],
+            port=int(redis_url.split(":")[1].split("/")[0]),
+            password=redis_token,
+            ssl=True,
+            decode_responses=True
+        )
         # Test the connection
         redis_client.ping()
-        logging.info("Successfully connected to Redis")
+        logging.info("Successfully connected to Upstash Redis")
     except Exception as e:
-        logging.error(f"Failed to connect to Redis: {e}")
+        logging.error(f"Failed to connect to Upstash Redis: {e}")
         redis_client = None
 else:
     redis_client = None
-    logging.warning("REDIS_URL not set, Redis functionality disabled")
+    logging.warning("UPSTASH_REDIS_URL or UPSTASH_REDIS_TOKEN not set, Redis functionality disabled")
 
-# Global user states dictionary
+# Global user states dictionary (fallback)
 user_states = {}
 
 wa_token = os.environ.get("WA_TOKEN")  # Whatsapp API Key
@@ -162,7 +171,9 @@ def save_user_states():
     """Save all user states to Redis"""
     if redis_client:
         try:
-            redis_client.set("user_states", json.dumps(user_states))
+            # Save each user state individually for better performance
+            for sender, state in user_states.items():
+                redis_client.setex(f"user_state:{sender}", timedelta(days=30), json.dumps(state))
             logging.info("User states saved to Redis")
         except Exception as e:
             logging.error(f"Error saving user states to Redis: {e}")
@@ -172,13 +183,15 @@ def load_user_states():
     global user_states
     if redis_client:
         try:
-            states_data = redis_client.get("user_states")
-            if states_data:
-                user_states = json.loads(states_data)
-                logging.info("User states loaded from Redis")
-            else:
-                user_states = {}
-                logging.info("No user states found in Redis, initializing empty")
+            # Get all user state keys
+            keys = redis_client.keys("user_state:*")
+            user_states = {}
+            for key in keys:
+                sender = key.decode().replace("user_state:", "") if isinstance(key, bytes) else key.replace("user_state:", "")
+                state_data = redis_client.get(key)
+                if state_data:
+                    user_states[sender] = json.loads(state_data)
+            logging.info(f"Loaded {len(user_states)} user states from Redis")
         except Exception as e:
             logging.error(f"Error loading user states from Redis: {e}")
             user_states = {}
@@ -213,6 +226,24 @@ def save_user_conversation(sender, role, message):
             logging.debug(f"Saved conversation for {sender}")
         except Exception as e:
             logging.error(f"Error saving conversation to Redis: {e}")
+
+def save_user_state(sender, state):
+    """Save individual user state to Redis"""
+    if redis_client:
+        try:
+            redis_client.setex(f"user_state:{sender}", timedelta(days=30), json.dumps(state))
+        except Exception as e:
+            logging.error(f"Error saving user state for {sender} to Redis: {e}")
+
+def get_user_state(sender):
+    """Get individual user state from Redis"""
+    if redis_client:
+        try:
+            state_data = redis_client.get(f"user_state:{sender}")
+            return json.loads(state_data) if state_data else None
+        except Exception as e:
+            logging.error(f"Error getting user state for {sender} from Redis: {e}")
+    return None
 
 def detect_language(message):
     """Detect language based on keywords in the message"""
@@ -442,7 +473,7 @@ def handle_language_detection(sender, prompt, phone_id):
     else:
         send("Hello! I'm Rudo, Dawa Health's virtual assistant. Let's start with registration. What is your full name?", sender, phone_id)
     
-    save_user_states()
+    save_user_state(sender, user_states[sender])
 
 def handle_registration(sender, prompt, phone_id):
     """Handle registration state"""
@@ -485,7 +516,7 @@ def handle_registration(sender, prompt, phone_id):
         else:
             send("Thank you for registering! How can I help you today? Please choose one:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
     
-    save_user_states()
+    save_user_state(sender, state)
 
 def handle_cervical_cancer_menu(sender, prompt, phone_id):
     """Handle cervical cancer menu options"""
@@ -525,7 +556,7 @@ def handle_cervical_cancer_menu(sender, prompt, phone_id):
         else:
             send("I'm sorry, I didn't understand. Would you like information or to order products?", sender, phone_id)
     
-    save_user_states()
+    save_user_state(sender, state)
 
 def handle_cervical_image(sender, image_url, phone_id):
     """Handle cervical cancer image for staging"""
@@ -575,7 +606,7 @@ def handle_cervical_image(sender, image_url, phone_id):
     else:
         send("How else can I help you? Please choose one:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
     
-    save_user_states()
+    save_user_state(sender, state)
 
 def handle_main_menu(sender, prompt, phone_id):
     """Handle main menu state"""
@@ -622,7 +653,7 @@ def handle_main_menu(sender, prompt, phone_id):
             else:
                 send("Sorry, we're experiencing high traffic. Please try again later.", sender, phone_id)
     
-    save_user_states()
+    save_user_state(sender, state)
 
 def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_type=None):
     """Handle conversation based on current state"""
@@ -651,11 +682,12 @@ def message_handler(data, phone_id):
     
     sender = data["from"]
     
-    # Load states to ensure we have the latest
-    load_user_states()
-    
-    # Initialize if new user
-    if sender not in user_states:
+    # Load user state from Redis
+    state = get_user_state(sender)
+    if state:
+        user_states[sender] = state
+    else:
+        # Initialize if new user
         user_states[sender] = {
             "step": "language_detection",
             "language": "english",
@@ -665,7 +697,7 @@ def message_handler(data, phone_id):
             "address": None,
             "conversation_history": []
         }
-        save_user_states()
+        save_user_state(sender, user_states[sender])
     
     # Extract message and media
     prompt = ""
