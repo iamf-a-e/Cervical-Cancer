@@ -21,22 +21,32 @@ from google.oauth2 import service_account
 
 logging.basicConfig(level=logging.INFO)
 
-# Initialize Redis connection
-redis_url = os.environ.get("REDIS_URL")
-if redis_url:
+# Initialize Redis connection for Upstash
+redis_url = os.environ.get("UPSTASH_REDIS_URL")
+redis_token = os.environ.get("UPSTASH_REDIS_TOKEN")
+
+if redis_url and redis_token:
     try:
-        redis_client = redis.from_url(redis_url)
+        # Use from_url for better Upstash Redis compatibility
+        redis_client = redis.from_url(
+            redis_url,
+            password=redis_token,
+            ssl=True,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5
+        )
         # Test the connection
         redis_client.ping()
-        logging.info("Successfully connected to Redis")
+        logging.info("Successfully connected to Upstash Redis")
     except Exception as e:
-        logging.error(f"Failed to connect to Redis: {e}")
+        logging.error(f"Failed to connect to Upstash Redis: {e}")
         redis_client = None
 else:
     redis_client = None
-    logging.warning("REDIS_URL not set, Redis functionality disabled")
+    logging.warning("UPSTASH_REDIS_URL or UPSTASH_REDIS_TOKEN not set, Redis functionality disabled")
 
-# Global user states dictionary
+# Global user states dictionary (fallback)
 user_states = {}
 
 wa_token = os.environ.get("WA_TOKEN")  # Whatsapp API Key
@@ -162,8 +172,10 @@ def save_user_states():
     """Save all user states to Redis"""
     if redis_client:
         try:
-            redis_client.set("user_states", json.dumps(user_states))
-            logging.info("User states saved to Redis")
+            # Save each user state individually for better performance
+            for sender, state in user_states.items():
+                redis_client.setex(f"user_state:{sender}", timedelta(days=30), json.dumps(state))
+            logging.info(f"User states saved to Redis: {len(user_states)} states")
         except Exception as e:
             logging.error(f"Error saving user states to Redis: {e}")
 
@@ -172,18 +184,29 @@ def load_user_states():
     global user_states
     if redis_client:
         try:
-            states_data = redis_client.get("user_states")
-            if states_data:
-                user_states = json.loads(states_data)
-                logging.info("User states loaded from Redis")
-            else:
-                user_states = {}
-                logging.info("No user states found in Redis, initializing empty")
+            # Get all user state keys
+            keys = redis_client.keys("user_state:*")
+            user_states = {}
+            for key in keys:
+                sender = key.replace("user_state:", "")
+                state_data = redis_client.get(key)
+                if state_data:
+                    try:
+                        state = json.loads(state_data)
+                        # Validate state structure
+                        if isinstance(state, dict) and "step" in state:
+                            user_states[sender] = state
+                        else:
+                            logging.warning(f"Invalid state structure for {sender}: {state}")
+                    except json.JSONDecodeError as e:
+                        logging.error(f"Error decoding JSON for {sender}: {e}")
+            logging.info(f"Loaded {len(user_states)} user states from Redis")
         except Exception as e:
             logging.error(f"Error loading user states from Redis: {e}")
             user_states = {}
     else:
         user_states = {}
+        logging.warning("Redis client not available, using in-memory storage only")
 
 def get_user_conversation(sender):
     """Get user conversation history from Redis"""
@@ -213,6 +236,47 @@ def save_user_conversation(sender, role, message):
             logging.debug(f"Saved conversation for {sender}")
         except Exception as e:
             logging.error(f"Error saving conversation to Redis: {e}")
+
+def save_user_state(sender, state):
+    """Save individual user state to Redis with validation"""
+    if not redis_client:
+        logging.debug("Redis client not available, skipping state save")
+        return
+        
+    try:
+        # Validate state structure before saving
+        if isinstance(state, dict) and "step" in state:
+            redis_client.setex(
+                f"user_state:{sender}", 
+                timedelta(days=30), 
+                json.dumps(state)
+            )
+            logging.debug(f"Saved state for {sender}: {state['step']}")
+        else:
+            logging.error(f"Invalid state structure for {sender}: {state}")
+    except Exception as e:
+        logging.error(f"Error saving user state for {sender} to Redis: {e}")
+
+def get_user_state(sender):
+    """Get individual user state from Redis with better error handling"""
+    if not redis_client:
+        return None
+        
+    try:
+        state_data = redis_client.get(f"user_state:{sender}")
+        if state_data:
+            state = json.loads(state_data)
+            # Validate the state structure
+            if isinstance(state, dict) and "step" in state:
+                logging.debug(f"Loaded state for {sender}: {state['step']}")
+                return state
+            else:
+                logging.warning(f"Invalid state structure for {sender}: {state}")
+                return None
+        return None
+    except Exception as e:
+        logging.error(f"Error getting user state for {sender} from Redis: {e}")
+        return None
 
 def detect_language(message):
     """Detect language based on keywords in the message"""
@@ -249,7 +313,13 @@ def send(answer, sender, phone_id):
         }
     }
 
-    response = requests.post(url, headers=headers, json=data)
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        logging.debug(f"Message sent to {sender}")
+    except Exception as e:
+        logging.error(f"Error sending message to {sender}: {e}")
+        response = None
 
     # Save bot response to conversation history
     save_user_conversation(sender, "bot", answer)
@@ -265,9 +335,14 @@ def remove(*file_paths):
 def download_image(url, file_path):
     """Download image from URL"""
     try:
-        response = requests.get(url)
+        headers = {
+            'Authorization': f'Bearer {wa_token}'
+        }
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
         with open(file_path, 'wb') as f:
             f.write(response.content)
+        logging.debug(f"Image downloaded to {file_path}")
         return True
     except Exception as e:
         logging.error(f"Error downloading image: {e}")
@@ -423,109 +498,77 @@ def handle_language_detection(sender, prompt, phone_id):
     """Handle language detection state"""
     detected_lang = detect_language(prompt)
     user_states[sender]["language"] = detected_lang
-    user_states[sender]["step"] = "registration"
+    user_states[sender]["step"] = "worker_id"
     user_states[sender]["needs_language_confirmation"] = False
 
     # Send appropriate greeting based on language
     if detected_lang == "shona":
-        send("Mhoro! Ndinonzi Rudo, mubatsiri wepamhepo weDawa Health. Reggai titange nekunyoresa. Zita renyu rizere ndiani?", sender, phone_id)
+        send("Mhoro! Ndinonzi Rudo, mubatsiri wepamhepo weDawa Health. Reggai titange nekunyoresa. Worker ID yenyu ndeyipi?", sender, phone_id)
     elif detected_lang == "ndebele":
-        send("Sawubona! Ngingu Rudo, isiphathamandla se-Dawa Health. Masige saqala ngokubhalisa. Ibizo lakho eliphelele lithini?", sender, phone_id)
+        send("Sawubona! Ngingu Rudo, isiphathamandla se-Dawa Health. Masige saqala ngokubhalisa. I-Worker ID yakho ithini?", sender, phone_id)
     elif detected_lang == "tonga":
-        send("Mwabuka buti! Nine Rudo, munisanga wa Dawa Health. Tuyambile mukubhaliska. Izina lyenu mwaziba nani?", sender, phone_id)
+        send("Mwabuka buti! Nine Rudo, munisanga wa Dawa Health. Tuyambile mukubhaliska. Worker ID yobe iyi?", sender, phone_id)
     elif detected_lang == "chinyanja":
-        send("Moni! Ndine Rudo, katandizi wa Dawa Health. Tiyambireni ndikulembetsani. Dzina lanu lonse ndi ndani?", sender, phone_id)
+        send("Moni! Ndine Rudo, katandizi wa Dawa Health. Tiyambireni ndikulembetsani. Worker ID yanu ndi yotani?", sender, phone_id)
     elif detected_lang == "bemba":
-        send("Mwashibukeni! Nine Rudo, umushishi wa Dawa Health. Tulembefye. Ishibo lyenu lyonse nani?", sender, phone_id)
+        send("Mwashibukeni! Nine Rudo, umushishi wa Dawa Health. Tulembefye. Worker ID yobe ili shani?", sender, phone_id)
     elif detected_lang == "lozi":
-        send("Muzuhile! Nine Rudo, musiyami wa Dawa Health. Re kae ku sa felisize. Libizo la hao ke mang?", sender, phone_id)
+        send("Muzuhile! Nine Rudo, musiyami wa Dawa Health. Re kae ku sa felisize. Worker ID ya hao ki i?", sender, phone_id)
     else:
-        send("Hello! I'm Rudo, Dawa Health's virtual assistant. Let's start with registration. What is your full name?", sender, phone_id)
+        send("Hello! I'm Rudo, Dawa Health's virtual assistant. Let's start with registration. What is your Worker ID?", sender, phone_id)
     
-    save_user_states()
+    save_user_state(sender, user_states[sender])
 
-def handle_registration(sender, prompt, phone_id):
-    """Handle registration state"""
+def handle_worker_id(sender, prompt, phone_id):
+    """Handle worker ID state"""
     state = user_states[sender]
     lang = state["language"]
     
-    if state["full_name"] is None:
-        state["full_name"] = prompt
-        if lang == "shona":
-            send("Ndatenda! Kero yenyu ndeyipi?", sender, phone_id)
-        elif lang == "ndebele":
-            send("Ngiyabonga! Ikheli lakho lithini?", sender, phone_id)
-        elif lang == "tonga":
-            send("Twatotela! Adilesi yobe iyi?", sender, phone_id)
-        elif lang == "chinyanja":
-            send("Zikomo! Adilesi yanu ndi yotani?", sender, phone_id)
-        elif lang == "bemba":
-            send("Natotela! Adilesi yobe ili shani?", sender, phone_id)
-        elif lang == "lozi":
-            send("Ni itumezi! Adrese ya hao ki i?", sender, phone_id)
-        else:
-            send("Thank you! What is your address?", sender, phone_id)
-    else:
-        state["address"] = prompt
-        state["registered"] = True
-        state["step"] = "main_menu"
-        
-        if lang == "shona":
-            send("Ndatenda! Ndingakubatsirei nhasi? Sarudza imwe yesarudzo inotevera:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
-        elif lang == "ndebele":
-            send("Ngiyabonga! Ngingakusiza ngani namuhla? Khetha okukodwa:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
-        elif lang == "tonga":
-            send("Twatotela! Ndingakusebelesya shani lelo? Santha imwe:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
-        elif lang == "chinyanja":
-            send("Zikomo! Ndingakuthandizani lero? Sankhani imodzi:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
-        elif lang == "bemba":
-            send("Natotela! Nshingafye uli shani lelo? Palamina imo:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
-        elif lang == "lozi":
-            send("Ni itumezi! Ni ka ku thusa jaha ki? Kopa sina:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
-        else:
-            send("Thank you for registering! How can I help you today? Please choose one:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
+    state["worker_id"] = prompt
+    state["step"] = "patient_id"
     
-    save_user_states()
+    if lang == "shona":
+        send("Ndatenda! Patient ID yemurwere ndeyipi?", sender, phone_id)
+    elif lang == "ndebele":
+        send("Ngiyabonga! I-Patient ID yomguli ithini?", sender, phone_id)
+    elif lang == "tonga":
+        send("Twatotela! Patient ID ya muwandi iyi?", sender, phone_id)
+    elif lang == "chinyanja":
+        send("Zikomo! Patient ID ya wodwalayo ndi yotani?", sender, phone_id)
+    elif lang == "bemba":
+        send("Natotela! Patient ID ya mulewele shani?", sender, phone_id)
+    elif lang == "lozi":
+        send("Ni itumezi! Patient ID ya muwali ki i?", sender, phone_id)
+    else:
+        send("Thank you! What is the Patient ID?", sender, phone_id)
+    
+    save_user_state(sender, state)
 
-def handle_cervical_cancer_menu(sender, prompt, phone_id):
-    """Handle cervical cancer menu options"""
+def handle_patient_id(sender, prompt, phone_id):
+    """Handle patient ID state"""
     state = user_states[sender]
     lang = state["language"]
     
-    prompt_lower = prompt.lower()
+    state["patient_id"] = prompt
+    state["registered"] = True
+    state["step"] = "awaiting_image"
     
-    if "information" in prompt_lower or "info" in prompt_lower or "ruzivo" in prompt_lower:
-        # Provide information about cervical cancer
-        if lang == "shona":
-            info = "Gomarara remuromo wechibereko (Cervical Cancer) ndiro gomarara rinowanikwa pachibereko chevakadzi. Rinokonzerwa nehutachiwana hunonzi HPV. Zvimwe zvezviratidzo zvinosanganisira:\n- Kubuda ropa kusingatarisirwi\n- Kurwadza panguva yekusangana pabonde\n- Kunhuhwirira kusinganzwisisike\n- Kurwadza mudumbu kana kusana\n\nKana uine chero zviratidzo izvi, unofanira kuongororwa nechiremba."
-        else:
-            info = "Cervical cancer is a type of cancer that occurs in the cells of the cervix. It's often caused by the HPV virus. Some symptoms include:\n- Abnormal bleeding\n- Pain during intercourse\n- Unusual discharge\n- Pelvic pain\n\nIf you experience any of these symptoms, you should see a doctor."
-        
-        send(info, sender, phone_id)
-        
-        # Ask if they want to upload an image for staging
-        if lang == "shona":
-            send("Unoda kuendesa mufananidzo wechibereko chekuongororwa here? Kana hongu, tumira mufananidzo wako.", sender, phone_id)
-        else:
-            send("Would you like to upload a cervical image for staging? If yes, please send your image.", sender, phone_id)
-            
-        state["step"] = "awaiting_cervical_image"
-        
-    elif "order" in prompt_lower or "product" in prompt_lower or "kutenga" in prompt_lower:
-        # Show cervical cancer products (text only)
-        if lang == "shona":
-            send("Tine zvigadzirwa zvegomarara remuromo wechibereko zvinotevera:\n- HPV Vaccine\n- Cervical Screening Kit\n- Pain Relief Medication\n\nUnoda kuziva zvimwe here kana kutenga chimwe?", sender, phone_id)
-        else:
-            send("We have the following cervical cancer products:\n- HPV Vaccine\n- Cervical Screening Kit\n- Pain Relief Medication\n\nWould you like more information or to order any of these?", sender, phone_id)
-            
+    if lang == "shona":
+        send("Ndatenda! Zvino ndapota tumirai mufananidzo wekuongororwa.", sender, phone_id)
+    elif lang == "ndebele":
+        send("Ngiyabonga! Manje ngicela uthumele isithombe sokuhlola.", sender, phone_id)
+    elif lang == "tonga":
+        send("Twatotela! Nomba tumizya ciswaswani cekuongolesya.", sender, phone_id)
+    elif lang == "chinyanja":
+        send("Zikomo! Tsopano chonde tumizani chithunzi choyeserera.", sender, phone_id)
+    elif lang == "bemba":
+        send("Natotela! Nomba napapata tumishanye icinskana cekupekuleshya.", sender, phone_id)
+    elif lang == "lozi":
+        send("Ni itumezi! Kacenu, ni lu tumela sitapi sa ku kekula.", sender, phone_id)
     else:
-        # Default response
-        if lang == "shona":
-            send("Ndine urombo, handina kunzwisisa. Unoda ruzivo here kana kutenga zvigadzirwa?", sender, phone_id)
-        else:
-            send("I'm sorry, I didn't understand. Would you like information or to order products?", sender, phone_id)
+        send("Thank you! Now please send the image for diagnosis.", sender, phone_id)
     
-    save_user_states()
+    save_user_state(sender, state)
 
 def handle_cervical_image(sender, image_url, phone_id):
     """Handle cervical cancer image for staging"""
@@ -548,10 +591,14 @@ def handle_cervical_image(sender, image_url, phone_id):
             stage = result["stage"]
             confidence = result["confidence"]
             
+            # Add worker ID and patient ID to the result
+            worker_id = state.get("worker_id", "Unknown")
+            patient_id = state.get("patient_id", "Unknown")
+            
             if lang == "shona":
-                response = f"Mhedzisiro yekuongorora:\n- Danho: {stage}\n- Chivimbo: {confidence:.2%}\n\nNote: Izvi hazvitsivi kuongororwa kwechiremba. Unofanira kuona chiremba kuti uwane kuongororwa kwakazara."
+                response = f"Mhedzisiro yekuongorora:\n- Worker ID: {worker_id}\n- Patient ID: {patient_id}\n- Danho: {stage}\n- Chivimbo: {confidence:.2%}\n\nNote: Izvi hazvitsivi kuongororwa kwechiremba. Unofanira kuona chiremba kuti uwane kuongororwa kwakazara."
             else:
-                response = f"Staging results:\n- Stage: {stage}\n- Confidence: {confidence:.2%}\n\nNote: This does not replace a doctor's diagnosis. Please see a healthcare professional for a complete evaluation."
+                response = f"Diagnosis results:\n- Worker ID: {worker_id}\n- Patient ID: {patient_id}\n- Stage: {stage}\n- Confidence: {confidence:.2%}\n\nNote: This does not replace a doctor's diagnosis. Please see a healthcare professional for a complete evaluation."
         else:
             if lang == "shona":
                 response = "Ndine urombo, handina kukwanisa kuongorora mufananidzo wenyu. Edza kuendesa imwe mufananidzo kana kumbobvunza chiremba."
@@ -568,35 +615,64 @@ def handle_cervical_image(sender, image_url, phone_id):
         else:
             send("I'm sorry, I couldn't download your image. Please try again.", sender, phone_id)
     
-    # Return to main menu
-    state["step"] = "main_menu"
+    # Ask if they want to submit another image or end the session
+    state["step"] = "follow_up"
     if lang == "shona":
-        send("Ndingakubatsirei zvimwe? Sarudza imwe yesarudzo inotevera:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
+        send("Unoda kuendesa imwe mufananidzo here? (Reply 'Ehe' for yes or 'Aihwa' for no)", sender, phone_id)
     else:
-        send("How else can I help you? Please choose one:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
+        send("Would you like to submit another image? (Reply 'Yes' or 'No')", sender, phone_id)
     
-    save_user_states()
+    save_user_state(sender, state)
 
-def handle_main_menu(sender, prompt, phone_id):
-    """Handle main menu state"""
+def handle_follow_up(sender, prompt, phone_id):
+    """Handle follow-up after diagnosis"""
     state = user_states[sender]
     lang = state["language"]
     
     prompt_lower = prompt.lower()
     
-    if "maternal" in prompt_lower or "pregnancy" in prompt_lower:
+    if any(word in prompt_lower for word in ["yes", "ehe", "yebo", "hongu", "ndinoda"]):
+        # Reset to patient ID step for new diagnosis
+        state["step"] = "patient_id"
         if lang == "shona":
-            send("Unoda ruzivo here kana kutenga zvigadzirwa zvepamuviri?", sender, phone_id)
+            send("Patient ID yemurwere itsva ndeyipi?", sender, phone_id)
         else:
-            send("Would you like information or to order pregnancy products?", sender, phone_id)
-    elif "cervical" in prompt_lower or "cancer" in prompt_lower:
-        state["step"] = "cervical_cancer_menu"
-        if lang == "shona":
-            send("Unoda ruzivo here kana kutenga zvigadzirwa zvegomarara remuromo wechibereko?", sender, phone_id)
-        else:
-            send("Would you like information or to order cervical cancer products?", sender, phone_id)
+            send("What is the Patient ID for the new patient?", sender, phone_id)
     else:
-        # Use Gemini for other queries while maintaining state
+        # End session
+        state["step"] = "main_menu"
+        if lang == "shona":
+            send("Ndatenda nekushandisa Dawa Health. Kana uine mimwe mibvunzo, tendera kuti ndikubatsire.", sender, phone_id)
+        else:
+            send("Thank you for using Dawa Health. If you have more questions, feel free to ask.", sender, phone_id)
+    
+    save_user_state(sender, state)
+
+def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_type=None):
+    """Handle conversation based on current state"""
+    state = user_states.get(sender)
+    if not state:
+        logging.error(f"No state found for {sender}")
+        return
+    
+    logging.info(f"Processing message from {sender}, current step: {state['step']}")
+    
+    # Check if we have an image for cervical cancer staging
+    if media_type == "image" and state["step"] == "awaiting_image":
+        handle_cervical_image(sender, media_url, phone_id)
+        return
+    
+    if state["step"] == "language_detection":
+        handle_language_detection(sender, prompt, phone_id)
+    elif state["step"] == "worker_id":
+        handle_worker_id(sender, prompt, phone_id)
+    elif state["step"] == "patient_id":
+        handle_patient_id(sender, prompt, phone_id)
+    elif state["step"] == "follow_up":
+        handle_follow_up(sender, prompt, phone_id)
+    elif state["step"] == "main_menu":
+        # For main menu, use Gemini for general queries
+        lang = state.get("language", "english")
         fresh_convo = model.start_chat(history=[])
         try:
             fresh_convo.send_message(instructions.instructions)
@@ -621,51 +697,40 @@ def handle_main_menu(sender, prompt, phone_id):
                 send("Ndine urombo, tiri kushandisa traffic yakawanda. Edza zvakare gare gare.", sender, phone_id)
             else:
                 send("Sorry, we're experiencing high traffic. Please try again later.", sender, phone_id)
-    
-    save_user_states()
-
-def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_type=None):
-    """Handle conversation based on current state"""
-    state = user_states[sender]
-    
-    # Check if we have an image for cervical cancer staging
-    if media_type == "image" and state["step"] == "awaiting_cervical_image":
-        handle_cervical_image(sender, media_url, phone_id)
-        return
-    
-    if state["step"] == "language_detection":
-        handle_language_detection(sender, prompt, phone_id)
-    elif state["step"] == "registration":
-        handle_registration(sender, prompt, phone_id)
-    elif state["step"] == "main_menu":
-        handle_main_menu(sender, prompt, phone_id)
-    elif state["step"] == "cervical_cancer_menu":
-        handle_cervical_cancer_menu(sender, prompt, phone_id)
     else:
         # Default to language detection if state is unknown
         state["step"] = "language_detection"
         handle_language_detection(sender, prompt, phone_id)
+    
+    save_user_state(sender, state)
 
 def message_handler(data, phone_id):
     global user_states
     
     sender = data["from"]
+    logging.info(f"Received message from {sender}")
     
-    # Load states to ensure we have the latest
-    load_user_states()
-    
-    # Initialize if new user
-    if sender not in user_states:
-        user_states[sender] = {
-            "step": "language_detection",
-            "language": "english",
-            "needs_language_confirmation": False,
-            "registered": False,
-            "full_name": None,
-            "address": None,
-            "conversation_history": []
-        }
-        save_user_states()
+    # Load user state from Redis with better handling
+    state = get_user_state(sender)
+    if state:
+        user_states[sender] = state
+        logging.info(f"Loaded existing state for {sender}: {state['step']}")
+    else:
+        # Only initialize if truly new user (not in memory either)
+        if sender not in user_states:
+            user_states[sender] = {
+                "step": "language_detection",
+                "language": "english",
+                "needs_language_confirmation": False,
+                "registered": False,
+                "worker_id": None,
+                "patient_id": None,
+                "conversation_history": []
+            }
+            save_user_state(sender, user_states[sender])
+            logging.info(f"Created new state for {sender}")
+        else:
+            logging.info(f"Using in-memory state for {sender}: {user_states[sender]['step']}")
     
     # Extract message and media
     prompt = ""
@@ -674,11 +739,13 @@ def message_handler(data, phone_id):
     
     if data["type"] == "text":
         prompt = data["text"]["body"]
+        logging.info(f"Text message: {prompt[:100]}...")
     elif data["type"] == "image":
         media_type = "image"
         media_url = data["image"]["id"]
         # For WhatsApp, we need to download the image using the Media API
         prompt = "[Image received]"
+        logging.info(f"Image received: {media_url}")
     
     # Save to conversation history
     save_user_conversation(sender, "user", prompt if prompt else "[Media message]")
@@ -709,6 +776,8 @@ def webhook():
     elif request.method == "POST":
         try:
             data = request.get_json()
+            logging.info(f"Webhook received: {json.dumps(data, indent=2)}")
+            
             entry = data["entry"][0]
             changes = entry["changes"][0]
             value = changes["value"]
@@ -752,7 +821,42 @@ def download_media(media_id):
         logging.error(f"Error downloading media: {e}")
         return jsonify({"success": False, "error": str(e)})
 
+@app.route("/test-redis", methods=["GET"])
+def test_redis():
+    """Test Redis connectivity"""
+    if redis_client:
+        try:
+            # Test basic operations
+            test_key = f"test_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            redis_client.set(test_key, "test_value", ex=10)
+            value = redis_client.get(test_key)
+            
+            # Test state operations
+            test_state = {"step": "test", "language": "english"}
+            redis_client.setex("test_state:123", timedelta(minutes=1), json.dumps(test_state))
+            saved_state = redis_client.get("test_state:123")
+            
+            return jsonify({
+                "status": "success", 
+                "redis_working": value == "test_value",
+                "state_operations": saved_state is not None,
+                "user_states_count": len(user_states)
+            })
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)})
+    else:
+        return jsonify({"status": "error", "message": "Redis client not initialized"})
+
+@app.route("/user-states", methods=["GET"])
+def get_user_states():
+    """Get current user states for debugging"""
+    return jsonify({
+        "user_states": user_states,
+        "redis_connected": redis_client is not None
+    })
+
 if __name__ == "__main__":
     # Load states at startup
     load_user_states()
+    logging.info(f"Application started with {len(user_states)} loaded user states")
     app.run(debug=True, port=8000)
