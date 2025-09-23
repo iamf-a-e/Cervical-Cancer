@@ -454,107 +454,75 @@ def handle_language_detection(sender, prompt, phone_id):
     """Handle language detection state"""
     detected_lang = detect_language(prompt)
     user_states[sender]["language"] = detected_lang
-    user_states[sender]["step"] = "registration"
+    user_states[sender]["step"] = "worker_id"
     user_states[sender]["needs_language_confirmation"] = False
 
     # Send appropriate greeting based on language
     if detected_lang == "shona":
-        send("Mhoro! Ndinonzi Rudo, mubatsiri wepamhepo weDawa Health. Reggai titange nekunyoresa. Zita renyu rizere ndiani?", sender, phone_id)
+        send("Mhoro! Ndinonzi Rudo, mubatsiri wepamhepo weDawa Health. Reggai titange nekunyoresa. Worker ID yenyu ndeyipi?", sender, phone_id)
     elif detected_lang == "ndebele":
-        send("Sawubona! Ngingu Rudo, isiphathamandla se-Dawa Health. Masige saqala ngokubhalisa. Ibizo lakho eliphelele lithini?", sender, phone_id)
+        send("Sawubona! Ngingu Rudo, isiphathamandla se-Dawa Health. Masige saqala ngokubhalisa. I-Worker ID yakho ithini?", sender, phone_id)
     elif detected_lang == "tonga":
-        send("Mwabuka buti! Nine Rudo, munisanga wa Dawa Health. Tuyambile mukubhaliska. Izina lyenu mwaziba nani?", sender, phone_id)
+        send("Mwabuka buti! Nine Rudo, munisanga wa Dawa Health. Tuyambile mukubhaliska. Worker ID yobe iyi?", sender, phone_id)
     elif detected_lang == "chinyanja":
-        send("Moni! Ndine Rudo, katandizi wa Dawa Health. Tiyambireni ndikulembetsani. Dzina lanu lonse ndi ndani?", sender, phone_id)
+        send("Moni! Ndine Rudo, katandizi wa Dawa Health. Tiyambireni ndikulembetsani. Worker ID yanu ndi yotani?", sender, phone_id)
     elif detected_lang == "bemba":
-        send("Mwashibukeni! Nine Rudo, umushishi wa Dawa Health. Tulembefye. Ishibo lyenu lyonse nani?", sender, phone_id)
+        send("Mwashibukeni! Nine Rudo, umushishi wa Dawa Health. Tulembefye. Worker ID yobe ili shani?", sender, phone_id)
     elif detected_lang == "lozi":
-        send("Muzuhile! Nine Rudo, musiyami wa Dawa Health. Re kae ku sa felisize. Libizo la hao ke mang?", sender, phone_id)
+        send("Muzuhile! Nine Rudo, musiyami wa Dawa Health. Re kae ku sa felisize. Worker ID ya hao ki i?", sender, phone_id)
     else:
-        send("Hello! I'm Rudo, Dawa Health's virtual assistant. Let's start with registration. What is your full name?", sender, phone_id)
+        send("Hello! I'm Rudo, Dawa Health's virtual assistant. Let's start with registration. What is your Worker ID?", sender, phone_id)
     
     save_user_state(sender, user_states[sender])
 
-def handle_registration(sender, prompt, phone_id):
-    """Handle registration state"""
+def handle_worker_id(sender, prompt, phone_id):
+    """Handle worker ID state"""
     state = user_states[sender]
     lang = state["language"]
     
-    if state["full_name"] is None:
-        state["full_name"] = prompt
-        if lang == "shona":
-            send("Ndatenda! Kero yenyu ndeyipi?", sender, phone_id)
-        elif lang == "ndebele":
-            send("Ngiyabonga! Ikheli lakho lithini?", sender, phone_id)
-        elif lang == "tonga":
-            send("Twatotela! Adilesi yobe iyi?", sender, phone_id)
-        elif lang == "chinyanja":
-            send("Zikomo! Adilesi yanu ndi yotani?", sender, phone_id)
-        elif lang == "bemba":
-            send("Natotela! Adilesi yobe ili shani?", sender, phone_id)
-        elif lang == "lozi":
-            send("Ni itumezi! Adrese ya hao ki i?", sender, phone_id)
-        else:
-            send("Thank you! What is your address?", sender, phone_id)
+    state["worker_id"] = prompt
+    state["step"] = "patient_id"
+    
+    if lang == "shona":
+        send("Ndatenda! Patient ID yemurwere ndeyipi?", sender, phone_id)
+    elif lang == "ndebele":
+        send("Ngiyabonga! I-Patient ID yomguli ithini?", sender, phone_id)
+    elif lang == "tonga":
+        send("Twatotela! Patient ID ya muwandi iyi?", sender, phone_id)
+    elif lang == "chinyanja":
+        send("Zikomo! Patient ID ya wodwalayo ndi yotani?", sender, phone_id)
+    elif lang == "bemba":
+        send("Natotela! Patient ID ya mulewele shani?", sender, phone_id)
+    elif lang == "lozi":
+        send("Ni itumezi! Patient ID ya muwali ki i?", sender, phone_id)
     else:
-        state["address"] = prompt
-        state["registered"] = True
-        state["step"] = "main_menu"
-        
-        if lang == "shona":
-            send("Ndatenda! Ndingakubatsirei nhasi? Sarudza imwe yesarudzo inotevera:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
-        elif lang == "ndebele":
-            send("Ngiyabonga! Ngingakusiza ngani namuhla? Khetha okukodwa:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
-        elif lang == "tonga":
-            send("Twatotela! Ndingakusebelesya shani lelo? Santha imwe:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
-        elif lang == "chinyanja":
-            send("Zikomo! Ndingakuthandizani lero? Sankhani imodzi:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
-        elif lang == "bemba":
-            send("Natotela! Nshingafye uli shani lelo? Palamina imo:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
-        elif lang == "lozi":
-            send("Ni itumezi! Ni ka ku thusa jaha ki? Kopa sina:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
-        else:
-            send("Thank you for registering! How can I help you today? Please choose one:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
+        send("Thank you! What is the Patient ID?", sender, phone_id)
     
     save_user_state(sender, state)
 
-def handle_cervical_cancer_menu(sender, prompt, phone_id):
-    """Handle cervical cancer menu options"""
+def handle_patient_id(sender, prompt, phone_id):
+    """Handle patient ID state"""
     state = user_states[sender]
     lang = state["language"]
     
-    prompt_lower = prompt.lower()
+    state["patient_id"] = prompt
+    state["registered"] = True
+    state["step"] = "awaiting_image"
     
-    if "information" in prompt_lower or "info" in prompt_lower or "ruzivo" in prompt_lower:
-        # Provide information about cervical cancer
-        if lang == "shona":
-            info = "Gomarara remuromo wechibereko (Cervical Cancer) ndiro gomarara rinowanikwa pachibereko chevakadzi. Rinokonzerwa nehutachiwana hunonzi HPV. Zvimwe zvezviratidzo zvinosanganisira:\n- Kubuda ropa kusingatarisirwi\n- Kurwadza panguva yekusangana pabonde\n- Kunhuhwirira kusinganzwisisike\n- Kurwadza mudumbu kana kusana\n\nKana uine chero zviratidzo izvi, unofanira kuongororwa nechiremba."
-        else:
-            info = "Cervical cancer is a type of cancer that occurs in the cells of the cervix. It's often caused by the HPV virus. Some symptoms include:\n- Abnormal bleeding\n- Pain during intercourse\n- Unusual discharge\n- Pelvic pain\n\nIf you experience any of these symptoms, you should see a doctor."
-        
-        send(info, sender, phone_id)
-        
-        # Ask if they want to upload an image for staging
-        if lang == "shona":
-            send("Unoda kuendesa mufananidzo wechibereko chekuongororwa here? Kana hongu, tumira mufananidzo wako.", sender, phone_id)
-        else:
-            send("Would you like to upload a cervical image for staging? If yes, please send your image.", sender, phone_id)
-            
-        state["step"] = "awaiting_cervical_image"
-        
-    elif "order" in prompt_lower or "product" in prompt_lower or "kutenga" in prompt_lower:
-        # Show cervical cancer products (text only)
-        if lang == "shona":
-            send("Tine zvigadzirwa zvegomarara remuromo wechibereko zvinotevera:\n- HPV Vaccine\n- Cervical Screening Kit\n- Pain Relief Medication\n\nUnoda kuziva zvimwe here kana kutenga chimwe?", sender, phone_id)
-        else:
-            send("We have the following cervical cancer products:\n- HPV Vaccine\n- Cervical Screening Kit\n- Pain Relief Medication\n\nWould you like more information or to order any of these?", sender, phone_id)
-            
+    if lang == "shona":
+        send("Ndatenda! Zvino ndapota tumirai mufananidzo wekuongororwa.", sender, phone_id)
+    elif lang == "ndebele":
+        send("Ngiyabonga! Manje ngicela uthumele isithombe sokuhlola.", sender, phone_id)
+    elif lang == "tonga":
+        send("Twatotela! Nomba tumizya ciswaswani cekuongolesya.", sender, phone_id)
+    elif lang == "chinyanja":
+        send("Zikomo! Tsopano chonde tumizani chithunzi choyeserera.", sender, phone_id)
+    elif lang == "bemba":
+        send("Natotela! Nomba napapata tumishanye icinskana cekupekuleshya.", sender, phone_id)
+    elif lang == "lozi":
+        send("Ni itumezi! Kacenu, ni lu tumela sitapi sa ku kekula.", sender, phone_id)
     else:
-        # Default response
-        if lang == "shona":
-            send("Ndine urombo, handina kunzwisisa. Unoda ruzivo here kana kutenga zvigadzirwa?", sender, phone_id)
-        else:
-            send("I'm sorry, I didn't understand. Would you like information or to order products?", sender, phone_id)
+        send("Thank you! Now please send the image for diagnosis.", sender, phone_id)
     
     save_user_state(sender, state)
 
@@ -579,10 +547,14 @@ def handle_cervical_image(sender, image_url, phone_id):
             stage = result["stage"]
             confidence = result["confidence"]
             
+            # Add worker ID and patient ID to the result
+            worker_id = state.get("worker_id", "Unknown")
+            patient_id = state.get("patient_id", "Unknown")
+            
             if lang == "shona":
-                response = f"Mhedzisiro yekuongorora:\n- Danho: {stage}\n- Chivimbo: {confidence:.2%}\n\nNote: Izvi hazvitsivi kuongororwa kwechiremba. Unofanira kuona chiremba kuti uwane kuongororwa kwakazara."
+                response = f"Mhedzisiro yekuongorora:\n- Worker ID: {worker_id}\n- Patient ID: {patient_id}\n- Danho: {stage}\n- Chivimbo: {confidence:.2%}\n\nNote: Izvi hazvitsivi kuongororwa kwechiremba. Unofanira kuona chiremba kuti uwane kuongororwa kwakazara."
             else:
-                response = f"Staging results:\n- Stage: {stage}\n- Confidence: {confidence:.2%}\n\nNote: This does not replace a doctor's diagnosis. Please see a healthcare professional for a complete evaluation."
+                response = f"Diagnosis results:\n- Worker ID: {worker_id}\n- Patient ID: {patient_id}\n- Stage: {stage}\n- Confidence: {confidence:.2%}\n\nNote: This does not replace a doctor's diagnosis. Please see a healthcare professional for a complete evaluation."
         else:
             if lang == "shona":
                 response = "Ndine urombo, handina kukwanisa kuongorora mufananidzo wenyu. Edza kuendesa imwe mufananidzo kana kumbobvunza chiremba."
@@ -599,35 +571,58 @@ def handle_cervical_image(sender, image_url, phone_id):
         else:
             send("I'm sorry, I couldn't download your image. Please try again.", sender, phone_id)
     
-    # Return to main menu
-    state["step"] = "main_menu"
+    # Ask if they want to submit another image or end the session
+    state["step"] = "follow_up"
     if lang == "shona":
-        send("Ndingakubatsirei zvimwe? Sarudza imwe yesarudzo inotevera:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
+        send("Unoda kuendesa imwe mufananidzo here? (Reply 'Ehe' for yes or 'Aihwa' for no)", sender, phone_id)
     else:
-        send("How else can I help you? Please choose one:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
+        send("Would you like to submit another image? (Reply 'Yes' or 'No')", sender, phone_id)
     
     save_user_state(sender, state)
 
-def handle_main_menu(sender, prompt, phone_id):
-    """Handle main menu state"""
+def handle_follow_up(sender, prompt, phone_id):
+    """Handle follow-up after diagnosis"""
     state = user_states[sender]
     lang = state["language"]
     
     prompt_lower = prompt.lower()
     
-    if "maternal" in prompt_lower or "pregnancy" in prompt_lower:
+    if any(word in prompt_lower for word in ["yes", "ehe", "yebo", "hongu", "ndinoda"]):
+        # Reset to patient ID step for new diagnosis
+        state["step"] = "patient_id"
         if lang == "shona":
-            send("Unoda ruzivo here kana kutenga zvigadzirwa zvepamuviri?", sender, phone_id)
+            send("Patient ID yemurwere itsva ndeyipi?", sender, phone_id)
         else:
-            send("Would you like information or to order pregnancy products?", sender, phone_id)
-    elif "cervical" in prompt_lower or "cancer" in prompt_lower:
-        state["step"] = "cervical_cancer_menu"
-        if lang == "shona":
-            send("Unoda ruzivo here kana kutenga zvigadzirwa zvegomarara remuromo wechibereko?", sender, phone_id)
-        else:
-            send("Would you like information or to order cervical cancer products?", sender, phone_id)
+            send("What is the Patient ID for the new patient?", sender, phone_id)
     else:
-        # Use Gemini for other queries while maintaining state
+        # End session
+        state["step"] = "main_menu"
+        if lang == "shona":
+            send("Ndatenda nekushandisa Dawa Health. Kana uine mimwe mibvunzo, tendera kuti ndikubatsire.", sender, phone_id)
+        else:
+            send("Thank you for using Dawa Health. If you have more questions, feel free to ask.", sender, phone_id)
+    
+    save_user_state(sender, state)
+
+def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_type=None):
+    """Handle conversation based on current state"""
+    state = user_states[sender]
+    
+    # Check if we have an image for cervical cancer staging
+    if media_type == "image" and state["step"] == "awaiting_image":
+        handle_cervical_image(sender, media_url, phone_id)
+        return
+    
+    if state["step"] == "language_detection":
+        handle_language_detection(sender, prompt, phone_id)
+    elif state["step"] == "worker_id":
+        handle_worker_id(sender, prompt, phone_id)
+    elif state["step"] == "patient_id":
+        handle_patient_id(sender, prompt, phone_id)
+    elif state["step"] == "follow_up":
+        handle_follow_up(sender, prompt, phone_id)
+    elif state["step"] == "main_menu":
+        # For main menu, use Gemini for general queries
         fresh_convo = model.start_chat(history=[])
         try:
             fresh_convo.send_message(instructions.instructions)
@@ -652,30 +647,12 @@ def handle_main_menu(sender, prompt, phone_id):
                 send("Ndine urombo, tiri kushandisa traffic yakawanda. Edza zvakare gare gare.", sender, phone_id)
             else:
                 send("Sorry, we're experiencing high traffic. Please try again later.", sender, phone_id)
-    
-    save_user_state(sender, state)
-
-def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_type=None):
-    """Handle conversation based on current state"""
-    state = user_states[sender]
-    
-    # Check if we have an image for cervical cancer staging
-    if media_type == "image" and state["step"] == "awaiting_cervical_image":
-        handle_cervical_image(sender, media_url, phone_id)
-        return
-    
-    if state["step"] == "language_detection":
-        handle_language_detection(sender, prompt, phone_id)
-    elif state["step"] == "registration":
-        handle_registration(sender, prompt, phone_id)
-    elif state["step"] == "main_menu":
-        handle_main_menu(sender, prompt, phone_id)
-    elif state["step"] == "cervical_cancer_menu":
-        handle_cervical_cancer_menu(sender, prompt, phone_id)
     else:
         # Default to language detection if state is unknown
         state["step"] = "language_detection"
         handle_language_detection(sender, prompt, phone_id)
+    
+    save_user_state(sender, state)
 
 def message_handler(data, phone_id):
     global user_states
@@ -693,8 +670,8 @@ def message_handler(data, phone_id):
             "language": "english",
             "needs_language_confirmation": False,
             "registered": False,
-            "full_name": None,
-            "address": None,
+            "worker_id": None,
+            "patient_id": None,
             "conversation_history": []
         }
         save_user_state(sender, user_states[sender])
