@@ -21,7 +21,7 @@ from google.oauth2 import service_account
 logging.basicConfig(level=logging.INFO)
 
 # Initialize Redis connection for Upstash
-redis_url = os.environ.get("UPSTASH_REDIS_URL")
+redis_url = os.environ.get("REDIS_URL")
 
 if redis_url:
     try:
@@ -33,7 +33,7 @@ if redis_url:
         redis_client = None
 else:
     redis_client = None
-    logging.warning("UPSTASH_REDIS_URL not set, Redis functionality disabled")
+    logging.warning("REDIS_URL not set, Redis functionality disabled")
 
 # Global user states dictionary (fallback in-memory store)
 user_states = {}
