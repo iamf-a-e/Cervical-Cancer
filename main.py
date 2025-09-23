@@ -21,20 +21,28 @@ from google.oauth2 import service_account
 
 logging.basicConfig(level=logging.INFO)
 
-# Initialize Redis connection
-redis_url = os.environ.get("REDIS_URL")
-if redis_url:
+# Upstash Redis configuration
+UPSTASH_REDIS_URL = os.environ.get("UPSTASH_REDIS_URL")
+UPSTASH_REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_TOKEN")
+
+# Initialize Upstash Redis connection
+upstash_redis_client = None
+if UPSTASH_REDIS_URL and UPSTASH_REDIS_TOKEN:
     try:
-        redis_client = redis.from_url(redis_url)
-        # Test the connection
-        redis_client.ping()
-        logging.info("Successfully connected to Redis")
+        # Upstash Redis requires authentication via headers
+        upstash_redis_client = {
+            'url': UPSTASH_REDIS_URL,
+            'token': UPSTASH_REDIS_TOKEN,
+            'headers': {
+                'Authorization': f'Bearer {UPSTASH_REDIS_TOKEN}'
+            }
+        }
+        logging.info("Upstash Redis configuration loaded successfully")
     except Exception as e:
-        logging.error(f"Failed to connect to Redis: {e}")
-        redis_client = None
+        logging.error(f"Failed to configure Upstash Redis: {e}")
+        upstash_redis_client = None
 else:
-    redis_client = None
-    logging.warning("REDIS_URL not set, Redis functionality disabled")
+    logging.warning("UPSTASH_REDIS_URL or UPSTASH_REDIS_TOKEN not set, Upstash Redis functionality disabled")
 
 # Global user states dictionary
 user_states = {}
@@ -158,47 +166,102 @@ model = genai.GenerativeModel(model_name=model_name,
 
 convo = model.start_chat(history=[])
 
+def upstash_redis_get(key):
+    """Get value from Upstash Redis"""
+    if not upstash_redis_client:
+        return None
+    
+    try:
+        url = f"{upstash_redis_client['url']}/get/{key}"
+        response = requests.get(url, headers=upstash_redis_client['headers'])
+        response.raise_for_status()
+        result = response.json()
+        return result.get('result')
+    except Exception as e:
+        logging.error(f"Error getting key {key} from Upstash Redis: {e}")
+        return None
+
+def upstash_redis_set(key, value, ex=None):
+    """Set value in Upstash Redis with optional expiration"""
+    if not upstash_redis_client:
+        return False
+    
+    try:
+        url = f"{upstash_redis_client['url']}/set/{key}"
+        params = {}
+        if ex:
+            params['ex'] = ex
+        
+        # Convert value to string if it's not already
+        if not isinstance(value, str):
+            value = json.dumps(value)
+        
+        response = requests.post(url, headers=upstash_redis_client['headers'], 
+                                params=params, data=value)
+        response.raise_for_status()
+        return True
+    except Exception as e:
+        logging.error(f"Error setting key {key} in Upstash Redis: {e}")
+        return False
+
+def upstash_redis_delete(key):
+    """Delete key from Upstash Redis"""
+    if not upstash_redis_client:
+        return False
+    
+    try:
+        url = f"{upstash_redis_client['url']}/del/{key}"
+        response = requests.get(url, headers=upstash_redis_client['headers'])
+        response.raise_for_status()
+        return True
+    except Exception as e:
+        logging.error(f"Error deleting key {key} from Upstash Redis: {e}")
+        return False
+
 def save_user_states():
-    """Save all user states to Redis"""
-    if redis_client:
+    """Save all user states to Upstash Redis"""
+    if upstash_redis_client:
         try:
-            redis_client.set("user_states", json.dumps(user_states))
-            logging.info("User states saved to Redis")
+            success = upstash_redis_set("user_states", json.dumps(user_states))
+            if success:
+                logging.info("User states saved to Upstash Redis")
+            else:
+                logging.error("Failed to save user states to Upstash Redis")
         except Exception as e:
-            logging.error(f"Error saving user states to Redis: {e}")
+            logging.error(f"Error saving user states to Upstash Redis: {e}")
 
 def load_user_states():
-    """Load user states from Redis"""
+    """Load user states from Upstash Redis"""
     global user_states
-    if redis_client:
+    if upstash_redis_client:
         try:
-            states_data = redis_client.get("user_states")
+            states_data = upstash_redis_get("user_states")
             if states_data:
                 user_states = json.loads(states_data)
-                logging.info("User states loaded from Redis")
+                logging.info("User states loaded from Upstash Redis")
             else:
                 user_states = {}
-                logging.info("No user states found in Redis, initializing empty")
+                logging.info("No user states found in Upstash Redis, initializing empty")
         except Exception as e:
-            logging.error(f"Error loading user states from Redis: {e}")
+            logging.error(f"Error loading user states from Upstash Redis: {e}")
             user_states = {}
     else:
         user_states = {}
 
 def get_user_conversation(sender):
-    """Get user conversation history from Redis"""
-    if redis_client:
+    """Get user conversation history from Upstash Redis"""
+    if upstash_redis_client:
         try:
-            history = redis_client.get(f"conversation:{sender}")
+            history = upstash_redis_get(f"conversation:{sender}")
             return json.loads(history) if history else []
         except Exception as e:
-            logging.error(f"Error getting conversation from Redis: {e}")
+            logging.error(f"Error getting conversation from Upstash Redis: {e}")
             return []
     return []
 
 def save_user_conversation(sender, role, message):
-    """Save user conversation to Redis with timestamp"""
-    if redis_client:
+    """Save user conversation to Upstash Redis with timestamp"""
+    if upstash_redis_client:
         try:
             conversation = get_user_conversation(sender)
             conversation.append({
@@ -209,10 +272,14 @@ def save_user_conversation(sender, role, message):
             # Keep only the last 100 messages to prevent excessive storage
             if len(conversation) > 100:
                 conversation = conversation[-100:]
-            redis_client.setex(f"conversation:{sender}", timedelta(days=30), json.dumps(conversation))
-            logging.debug(f"Saved conversation for {sender}")
+            # Set expiration to 30 days (2592000 seconds)
+            success = upstash_redis_set(f"conversation:{sender}", json.dumps(conversation), ex=2592000)
+            if success:
+                logging.debug(f"Saved conversation for {sender}")
+            else:
+                logging.error(f"Failed to save conversation for {sender}")
         except Exception as e:
-            logging.error(f"Error saving conversation to Redis: {e}")
+            logging.error(f"Error saving conversation to Upstash Redis: {e}")
 
 def detect_language(message):
     """Detect language based on keywords in the message"""
@@ -741,18 +808,18 @@ def download_media(media_id):
             media_response.raise_for_status()
             
             # Save the media to a temporary file
-            media_path = f"/tmp/{media_id}.jpg"
-            with open(media_path, 'wb') as f:
+            file_path = f"/tmp/{media_id}.jpg"
+            with open(file_path, 'wb') as f:
                 f.write(media_response.content)
             
-            return jsonify({"success": True, "path": media_path})
+            return jsonify({"success": True, "file_path": file_path})
         else:
-            return jsonify({"success": False, "error": "No URL found in media data"})
+            return jsonify({"success": False, "error": "No URL found"})
     except Exception as e:
         logging.error(f"Error downloading media: {e}")
         return jsonify({"success": False, "error": str(e)})
 
 if __name__ == "__main__":
-    # Load states at startup
+    # Load user states on startup
     load_user_states()
-    app.run(debug=True, port=8000)
+    app.run(host="0.0.0.0", port=5000, debug=True)
