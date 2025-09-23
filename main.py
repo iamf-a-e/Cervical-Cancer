@@ -27,13 +27,14 @@ redis_token = os.environ.get("UPSTASH_REDIS_TOKEN")
 
 if redis_url and redis_token:
     try:
-        # For Upstash Redis, we need to include the token in the connection
-        redis_client = redis.Redis(
-            host=redis_url.replace("redis://", "").split(":")[0],
-            port=int(redis_url.split(":")[1].split("/")[0]),
+        # Use from_url for better Upstash Redis compatibility
+        redis_client = redis.from_url(
+            redis_url,
             password=redis_token,
             ssl=True,
-            decode_responses=True
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5
         )
         # Test the connection
         redis_client.ping()
@@ -174,7 +175,7 @@ def save_user_states():
             # Save each user state individually for better performance
             for sender, state in user_states.items():
                 redis_client.setex(f"user_state:{sender}", timedelta(days=30), json.dumps(state))
-            logging.info("User states saved to Redis")
+            logging.info(f"User states saved to Redis: {len(user_states)} states")
         except Exception as e:
             logging.error(f"Error saving user states to Redis: {e}")
 
@@ -187,16 +188,25 @@ def load_user_states():
             keys = redis_client.keys("user_state:*")
             user_states = {}
             for key in keys:
-                sender = key.decode().replace("user_state:", "") if isinstance(key, bytes) else key.replace("user_state:", "")
+                sender = key.replace("user_state:", "")
                 state_data = redis_client.get(key)
                 if state_data:
-                    user_states[sender] = json.loads(state_data)
+                    try:
+                        state = json.loads(state_data)
+                        # Validate state structure
+                        if isinstance(state, dict) and "step" in state:
+                            user_states[sender] = state
+                        else:
+                            logging.warning(f"Invalid state structure for {sender}: {state}")
+                    except json.JSONDecodeError as e:
+                        logging.error(f"Error decoding JSON for {sender}: {e}")
             logging.info(f"Loaded {len(user_states)} user states from Redis")
         except Exception as e:
             logging.error(f"Error loading user states from Redis: {e}")
             user_states = {}
     else:
         user_states = {}
+        logging.warning("Redis client not available, using in-memory storage only")
 
 def get_user_conversation(sender):
     """Get user conversation history from Redis"""
@@ -228,22 +238,45 @@ def save_user_conversation(sender, role, message):
             logging.error(f"Error saving conversation to Redis: {e}")
 
 def save_user_state(sender, state):
-    """Save individual user state to Redis"""
-    if redis_client:
-        try:
-            redis_client.setex(f"user_state:{sender}", timedelta(days=30), json.dumps(state))
-        except Exception as e:
-            logging.error(f"Error saving user state for {sender} to Redis: {e}")
+    """Save individual user state to Redis with validation"""
+    if not redis_client:
+        logging.debug("Redis client not available, skipping state save")
+        return
+        
+    try:
+        # Validate state structure before saving
+        if isinstance(state, dict) and "step" in state:
+            redis_client.setex(
+                f"user_state:{sender}", 
+                timedelta(days=30), 
+                json.dumps(state)
+            )
+            logging.debug(f"Saved state for {sender}: {state['step']}")
+        else:
+            logging.error(f"Invalid state structure for {sender}: {state}")
+    except Exception as e:
+        logging.error(f"Error saving user state for {sender} to Redis: {e}")
 
 def get_user_state(sender):
-    """Get individual user state from Redis"""
-    if redis_client:
-        try:
-            state_data = redis_client.get(f"user_state:{sender}")
-            return json.loads(state_data) if state_data else None
-        except Exception as e:
-            logging.error(f"Error getting user state for {sender} from Redis: {e}")
-    return None
+    """Get individual user state from Redis with better error handling"""
+    if not redis_client:
+        return None
+        
+    try:
+        state_data = redis_client.get(f"user_state:{sender}")
+        if state_data:
+            state = json.loads(state_data)
+            # Validate the state structure
+            if isinstance(state, dict) and "step" in state:
+                logging.debug(f"Loaded state for {sender}: {state['step']}")
+                return state
+            else:
+                logging.warning(f"Invalid state structure for {sender}: {state}")
+                return None
+        return None
+    except Exception as e:
+        logging.error(f"Error getting user state for {sender} from Redis: {e}")
+        return None
 
 def detect_language(message):
     """Detect language based on keywords in the message"""
@@ -280,7 +313,13 @@ def send(answer, sender, phone_id):
         }
     }
 
-    response = requests.post(url, headers=headers, json=data)
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        logging.debug(f"Message sent to {sender}")
+    except Exception as e:
+        logging.error(f"Error sending message to {sender}: {e}")
+        response = None
 
     # Save bot response to conversation history
     save_user_conversation(sender, "bot", answer)
@@ -296,9 +335,14 @@ def remove(*file_paths):
 def download_image(url, file_path):
     """Download image from URL"""
     try:
-        response = requests.get(url)
+        headers = {
+            'Authorization': f'Bearer {wa_token}'
+        }
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
         with open(file_path, 'wb') as f:
             f.write(response.content)
+        logging.debug(f"Image downloaded to {file_path}")
         return True
     except Exception as e:
         logging.error(f"Error downloading image: {e}")
@@ -606,7 +650,12 @@ def handle_follow_up(sender, prompt, phone_id):
 
 def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_type=None):
     """Handle conversation based on current state"""
-    state = user_states[sender]
+    state = user_states.get(sender)
+    if not state:
+        logging.error(f"No state found for {sender}")
+        return
+    
+    logging.info(f"Processing message from {sender}, current step: {state['step']}")
     
     # Check if we have an image for cervical cancer staging
     if media_type == "image" and state["step"] == "awaiting_image":
@@ -623,6 +672,7 @@ def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_ty
         handle_follow_up(sender, prompt, phone_id)
     elif state["step"] == "main_menu":
         # For main menu, use Gemini for general queries
+        lang = state.get("language", "english")
         fresh_convo = model.start_chat(history=[])
         try:
             fresh_convo.send_message(instructions.instructions)
@@ -658,23 +708,29 @@ def message_handler(data, phone_id):
     global user_states
     
     sender = data["from"]
+    logging.info(f"Received message from {sender}")
     
-    # Load user state from Redis
+    # Load user state from Redis with better handling
     state = get_user_state(sender)
     if state:
         user_states[sender] = state
+        logging.info(f"Loaded existing state for {sender}: {state['step']}")
     else:
-        # Initialize if new user
-        user_states[sender] = {
-            "step": "language_detection",
-            "language": "english",
-            "needs_language_confirmation": False,
-            "registered": False,
-            "worker_id": None,
-            "patient_id": None,
-            "conversation_history": []
-        }
-        save_user_state(sender, user_states[sender])
+        # Only initialize if truly new user (not in memory either)
+        if sender not in user_states:
+            user_states[sender] = {
+                "step": "language_detection",
+                "language": "english",
+                "needs_language_confirmation": False,
+                "registered": False,
+                "worker_id": None,
+                "patient_id": None,
+                "conversation_history": []
+            }
+            save_user_state(sender, user_states[sender])
+            logging.info(f"Created new state for {sender}")
+        else:
+            logging.info(f"Using in-memory state for {sender}: {user_states[sender]['step']}")
     
     # Extract message and media
     prompt = ""
@@ -683,11 +739,13 @@ def message_handler(data, phone_id):
     
     if data["type"] == "text":
         prompt = data["text"]["body"]
+        logging.info(f"Text message: {prompt[:100]}...")
     elif data["type"] == "image":
         media_type = "image"
         media_url = data["image"]["id"]
         # For WhatsApp, we need to download the image using the Media API
         prompt = "[Image received]"
+        logging.info(f"Image received: {media_url}")
     
     # Save to conversation history
     save_user_conversation(sender, "user", prompt if prompt else "[Media message]")
@@ -718,6 +776,8 @@ def webhook():
     elif request.method == "POST":
         try:
             data = request.get_json()
+            logging.info(f"Webhook received: {json.dumps(data, indent=2)}")
+            
             entry = data["entry"][0]
             changes = entry["changes"][0]
             value = changes["value"]
@@ -761,7 +821,42 @@ def download_media(media_id):
         logging.error(f"Error downloading media: {e}")
         return jsonify({"success": False, "error": str(e)})
 
+@app.route("/test-redis", methods=["GET"])
+def test_redis():
+    """Test Redis connectivity"""
+    if redis_client:
+        try:
+            # Test basic operations
+            test_key = f"test_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            redis_client.set(test_key, "test_value", ex=10)
+            value = redis_client.get(test_key)
+            
+            # Test state operations
+            test_state = {"step": "test", "language": "english"}
+            redis_client.setex("test_state:123", timedelta(minutes=1), json.dumps(test_state))
+            saved_state = redis_client.get("test_state:123")
+            
+            return jsonify({
+                "status": "success", 
+                "redis_working": value == "test_value",
+                "state_operations": saved_state is not None,
+                "user_states_count": len(user_states)
+            })
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)})
+    else:
+        return jsonify({"status": "error", "message": "Redis client not initialized"})
+
+@app.route("/user-states", methods=["GET"])
+def get_user_states():
+    """Get current user states for debugging"""
+    return jsonify({
+        "user_states": user_states,
+        "redis_connected": redis_client is not None
+    })
+
 if __name__ == "__main__":
     # Load states at startup
     load_user_states()
+    logging.info(f"Application started with {len(user_states)} loaded user states")
     app.run(debug=True, port=8000)
