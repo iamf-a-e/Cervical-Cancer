@@ -21,28 +21,20 @@ from google.oauth2 import service_account
 
 logging.basicConfig(level=logging.INFO)
 
-# Upstash Redis configuration
-UPSTASH_REDIS_URL = os.environ.get("UPSTASH_REDIS_URL")
-UPSTASH_REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_TOKEN")
-
-# Initialize Upstash Redis connection
-upstash_redis_client = None
-if UPSTASH_REDIS_URL and UPSTASH_REDIS_TOKEN:
+# Initialize Redis connection
+redis_url = os.environ.get("REDIS_URL")
+if redis_url:
     try:
-        # Upstash Redis requires authentication via headers
-        upstash_redis_client = {
-            'url': UPSTASH_REDIS_URL,
-            'token': UPSTASH_REDIS_TOKEN,
-            'headers': {
-                'Authorization': f'Bearer {UPSTASH_REDIS_TOKEN}'
-            }
-        }
-        logging.info("Upstash Redis configuration loaded successfully")
+        redis_client = redis.from_url(redis_url)
+        # Test the connection
+        redis_client.ping()
+        logging.info("Successfully connected to Redis")
     except Exception as e:
-        logging.error(f"Failed to configure Upstash Redis: {e}")
-        upstash_redis_client = None
+        logging.error(f"Failed to connect to Redis: {e}")
+        redis_client = None
 else:
-    logging.warning("UPSTASH_REDIS_URL or UPSTASH_REDIS_TOKEN not set, Upstash Redis functionality disabled")
+    redis_client = None
+    logging.warning("REDIS_URL not set, Redis functionality disabled")
 
 # Global user states dictionary
 user_states = {}
@@ -166,102 +158,47 @@ model = genai.GenerativeModel(model_name=model_name,
 
 convo = model.start_chat(history=[])
 
-def upstash_redis_get(key):
-    """Get value from Upstash Redis"""
-    if not upstash_redis_client:
-        return None
-    
-    try:
-        url = f"{upstash_redis_client['url']}/get/{key}"
-        response = requests.get(url, headers=upstash_redis_client['headers'])
-        response.raise_for_status()
-        result = response.json()
-        return result.get('result')
-    except Exception as e:
-        logging.error(f"Error getting key {key} from Upstash Redis: {e}")
-        return None
-
-def upstash_redis_set(key, value, ex=None):
-    """Set value in Upstash Redis with optional expiration"""
-    if not upstash_redis_client:
-        return False
-    
-    try:
-        url = f"{upstash_redis_client['url']}/set/{key}"
-        params = {}
-        if ex:
-            params['ex'] = ex
-        
-        # Convert value to string if it's not already
-        if not isinstance(value, str):
-            value = json.dumps(value)
-        
-        response = requests.post(url, headers=upstash_redis_client['headers'], 
-                                params=params, data=value)
-        response.raise_for_status()
-        return True
-    except Exception as e:
-        logging.error(f"Error setting key {key} in Upstash Redis: {e}")
-        return False
-
-def upstash_redis_delete(key):
-    """Delete key from Upstash Redis"""
-    if not upstash_redis_client:
-        return False
-    
-    try:
-        url = f"{upstash_redis_client['url']}/del/{key}"
-        response = requests.get(url, headers=upstash_redis_client['headers'])
-        response.raise_for_status()
-        return True
-    except Exception as e:
-        logging.error(f"Error deleting key {key} from Upstash Redis: {e}")
-        return False
-
 def save_user_states():
-    """Save all user states to Upstash Redis"""
-    if upstash_redis_client:
+    """Save all user states to Redis"""
+    if redis_client:
         try:
-            success = upstash_redis_set("user_states", json.dumps(user_states))
-            if success:
-                logging.info("User states saved to Upstash Redis")
-            else:
-                logging.error("Failed to save user states to Upstash Redis")
+            redis_client.set("user_states", json.dumps(user_states))
+            logging.info("User states saved to Redis")
         except Exception as e:
-            logging.error(f"Error saving user states to Upstash Redis: {e}")
+            logging.error(f"Error saving user states to Redis: {e}")
 
 def load_user_states():
-    """Load user states from Upstash Redis"""
+    """Load user states from Redis"""
     global user_states
-    if upstash_redis_client:
+    if redis_client:
         try:
-            states_data = upstash_redis_get("user_states")
+            states_data = redis_client.get("user_states")
             if states_data:
                 user_states = json.loads(states_data)
-                logging.info("User states loaded from Upstash Redis")
+                logging.info("User states loaded from Redis")
             else:
                 user_states = {}
-                logging.info("No user states found in Upstash Redis, initializing empty")
+                logging.info("No user states found in Redis, initializing empty")
         except Exception as e:
-            logging.error(f"Error loading user states from Upstash Redis: {e}")
+            logging.error(f"Error loading user states from Redis: {e}")
             user_states = {}
     else:
         user_states = {}
 
 def get_user_conversation(sender):
-    """Get user conversation history from Upstash Redis"""
-    if upstash_redis_client:
+    """Get user conversation history from Redis"""
+    if redis_client:
         try:
-            history = upstash_redis_get(f"conversation:{sender}")
+            history = redis_client.get(f"conversation:{sender}")
             return json.loads(history) if history else []
         except Exception as e:
-            logging.error(f"Error getting conversation from Upstash Redis: {e}")
+            logging.error(f"Error getting conversation from Redis: {e}")
             return []
     return []
 
 def save_user_conversation(sender, role, message):
-    """Save user conversation to Upstash Redis with timestamp"""
-    if upstash_redis_client:
+    """Save user conversation to Redis with timestamp"""
+    if redis_client:
         try:
             conversation = get_user_conversation(sender)
             conversation.append({
@@ -272,14 +209,10 @@ def save_user_conversation(sender, role, message):
             # Keep only the last 100 messages to prevent excessive storage
             if len(conversation) > 100:
                 conversation = conversation[-100:]
-            # Set expiration to 30 days (2592000 seconds)
-            success = upstash_redis_set(f"conversation:{sender}", json.dumps(conversation), ex=2592000)
-            if success:
-                logging.debug(f"Saved conversation for {sender}")
-            else:
-                logging.error(f"Failed to save conversation for {sender}")
+            redis_client.setex(f"conversation:{sender}", timedelta(days=30), json.dumps(conversation))
+            logging.debug(f"Saved conversation for {sender}")
         except Exception as e:
-            logging.error(f"Error saving conversation to Upstash Redis: {e}")
+            logging.error(f"Error saving conversation to Redis: {e}")
 
 def detect_language(message):
     """Detect language based on keywords in the message"""
@@ -339,98 +272,6 @@ def download_image(url, file_path):
     except Exception as e:
         logging.error(f"Error downloading image: {e}")
         return False
-
-def handle_cervical_image(sender, image_id, phone_id):
-    """Handle cervical cancer image for staging"""
-    state = user_states[sender]
-    lang = state["language"]
-    
-    # Download the image using the media ID
-    download_result = download_media(image_id)
-    
-    if not download_result["success"]:
-        if lang == "shona":
-            send("Ndine urombo, handina kukwanisa kugamuchira mufananidzo wenyu. Edza zvakare.", sender, phone_id)
-        else:
-            send("I'm sorry, I couldn't download your image. Please try again.", sender, phone_id)
-        return
-    
-    image_path = download_result["file_path"]
-    
-    if lang == "shona":
-        send("Ndiri kugamuchira mufananidzo wenyu. Ndapota mirira, ndiri kuongorora.", sender, phone_id)
-    else:
-        send("I've received your image. Please wait while I analyze it.", sender, phone_id)
-    
-    # Stage the cervical cancer
-    result = stage_cervical_cancer(image_path)
-    
-    if result["success"]:
-        stage = result["stage"]
-        confidence = result["confidence"]
-        
-        if lang == "shona":
-            response = f"Mhedzisiro yekuongorora:\n- Danho: {stage}\n- Chivimbo: {confidence:.2%}\n\nNote: Izvi hazvitsivi kuongororwa kwechiremba. Unofanira kuona chiremba kuti uwane kuongororwa kwakazara."
-        else:
-            response = f"Staging results:\n- Stage: {stage}\n- Confidence: {confidence:.2%}\n\nNote: This does not replace a doctor's diagnosis. Please see a healthcare professional for a complete evaluation."
-    else:
-        if lang == "shona":
-            response = "Ndine urombo, handina kukwanisa kuongorora mufananidzo wenyu. Edza kuendesa imwe mufananidzo kana kumbobvunza chiremba."
-        else:
-            response = "I'm sorry, I couldn't analyze your image. Please try sending another image or consult a doctor directly."
-    
-    # Clean up the downloaded image
-    remove(image_path)
-    
-    send(response, sender, phone_id)
-    
-    # Return to main menu
-    state["step"] = "main_menu"
-    if lang == "shona":
-        send("Ndingakubatsirei zvimwe? Sarudza imwe yesarudzo inotevera:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
-    else:
-        send("How else can I help you? Please choose one:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
-    
-    save_user_states()
-
-@app.route("/download_media/<media_id>", methods=["GET"])
-def download_media_endpoint(media_id):
-    """Endpoint to download media from WhatsApp"""
-    result = download_media(media_id)
-    return jsonify(result)
-
-def download_media(media_id):
-    """Download media from WhatsApp and return file path"""
-    try:
-        # First, get the media URL
-        url = f"https://graph.facebook.com/v19.0/{media_id}"
-        headers = {
-            'Authorization': f'Bearer {wa_token}'
-        }
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        media_data = response.json()
-        
-        # Download the actual media content
-        media_url = media_data.get("url")
-        if media_url:
-            media_response = requests.get(media_url, headers=headers)
-            media_response.raise_for_status()
-            
-            # Save the media to a temporary file
-            file_path = f"/tmp/{media_id}.jpg"
-            with open(file_path, 'wb') as f:
-                f.write(media_response.content)
-            
-            logging.info(f"Media downloaded successfully to {file_path}")
-            return {"success": True, "file_path": file_path}
-        else:
-            logging.error("No URL found in media data")
-            return {"success": False, "error": "No URL found in media data"}
-    except Exception as e:
-        logging.error(f"Error downloading media: {e}")
-        return {"success": False, "error": str(e)}
-        
 
 def stage_cervical_cancer(image_path):
     """Stage cervical cancer using Vertex AI REST API"""
@@ -686,6 +527,55 @@ def handle_cervical_cancer_menu(sender, prompt, phone_id):
     
     save_user_states()
 
+def handle_cervical_image(sender, image_url, phone_id):
+    """Handle cervical cancer image for staging"""
+    state = user_states[sender]
+    lang = state["language"]
+    
+    # Download the image
+    image_path = f"/tmp/{sender}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+    
+    if lang == "shona":
+        send("Ndiri kugamuchira mufananidzo wenyu. Ndapota mirira, ndiri kuongorora.", sender, phone_id)
+    else:
+        send("I've received your image. Please wait while I analyze it.", sender, phone_id)
+    
+    if download_image(image_url, image_path):
+        # Stage the cervical cancer
+        result = stage_cervical_cancer(image_path)
+        
+        if result["success"]:
+            stage = result["stage"]
+            confidence = result["confidence"]
+            
+            if lang == "shona":
+                response = f"Mhedzisiro yekuongorora:\n- Danho: {stage}\n- Chivimbo: {confidence:.2%}\n\nNote: Izvi hazvitsivi kuongororwa kwechiremba. Unofanira kuona chiremba kuti uwane kuongororwa kwakazara."
+            else:
+                response = f"Staging results:\n- Stage: {stage}\n- Confidence: {confidence:.2%}\n\nNote: This does not replace a doctor's diagnosis. Please see a healthcare professional for a complete evaluation."
+        else:
+            if lang == "shona":
+                response = "Ndine urombo, handina kukwanisa kuongorora mufananidzo wenyu. Edza kuendesa imwe mufananidzo kana kumbobvunza chiremba."
+            else:
+                response = "I'm sorry, I couldn't analyze your image. Please try sending another image or consult a doctor directly."
+        
+        # Clean up the downloaded image
+        remove(image_path)
+        
+        send(response, sender, phone_id)
+    else:
+        if lang == "shona":
+            send("Ndine urombo, handina kukwanisa kugamuchira mufananidzo wenyu. Edza zvakare.", sender, phone_id)
+        else:
+            send("I'm sorry, I couldn't download your image. Please try again.", sender, phone_id)
+    
+    # Return to main menu
+    state["step"] = "main_menu"
+    if lang == "shona":
+        send("Ndingakubatsirei zvimwe? Sarudza imwe yesarudzo inotevera:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
+    else:
+        send("How else can I help you? Please choose one:\n- Maternal Health\n- Cervical Cancer", sender, phone_id)
+    
+    save_user_states()
 
 def handle_main_menu(sender, prompt, phone_id):
     """Handle main menu state"""
@@ -734,13 +624,13 @@ def handle_main_menu(sender, prompt, phone_id):
     
     save_user_states()
 
-def handle_conversation_state(sender, prompt, phone_id, media_id=None, media_type=None):
+def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_type=None):
     """Handle conversation based on current state"""
     state = user_states[sender]
     
     # Check if we have an image for cervical cancer staging
     if media_type == "image" and state["step"] == "awaiting_cervical_image":
-        handle_cervical_image(sender, media_id, phone_id)
+        handle_cervical_image(sender, media_url, phone_id)
         return
     
     if state["step"] == "language_detection":
@@ -759,66 +649,48 @@ def handle_conversation_state(sender, prompt, phone_id, media_id=None, media_typ
 def message_handler(data, phone_id):
     global user_states
     
-    try:
-        sender = data["from"]
-        logging.info(f"Processing message from {sender}")
-        
-        # Load states to ensure we have the latest
-        load_user_states()
-        
-        # Initialize if new user
-        if sender not in user_states:
-            user_states[sender] = {
-                "step": "language_detection",
-                "language": "english",
-                "needs_language_confirmation": False,
-                "registered": False,
-                "full_name": None,
-                "address": None,
-                "conversation_history": []
-            }
-            save_user_states()
-        
-        # Extract message and media
-        prompt = ""
-        media_id = None
-        media_type = None
-        
-        if "type" in data:
-            if data["type"] == "text" and "text" in data and "body" in data["text"]:
-                prompt = data["text"]["body"]
-                logging.info(f"Text message received: {prompt}")
-            elif data["type"] == "image" and "image" in data:
-                media_type = "image"
-                media_id = data["image"]["id"]
-                prompt = "[Image received]"
-                logging.info("Image message received")
-            else:
-                logging.warning(f"Unhandled message type: {data.get('type')}")
-                prompt = "[Unhandled message type]"
-        else:
-            logging.warning("No message type found in data")
-            prompt = "[No message type]"
-        
-        # Save to conversation history
-        save_user_conversation(sender, "user", prompt if prompt else "[Media message]")
-        
-        # Handle based on current state
-        handle_conversation_state(sender, prompt, phone_id, media_id, media_type)
-        
-        # Daily report and cleanup
-        if db:
-            scheduler.enterabs(report_time.timestamp(), 1, create_report, (phone_id,))
-            scheduler.run(blocking=False)
-            delete_old_chats()
-            
-    except KeyError as e:
-        logging.error(f"KeyError in message_handler: {e}")
-        logging.error(f"Data structure: {data}")
-    except Exception as e:
-        logging.error(f"Unexpected error in message_handler: {e}")
-        logging.error(f"Data structure: {data}")
-
+    sender = data["from"]
+    
+    # Load states to ensure we have the latest
+    load_user_states()
+    
+    # Initialize if new user
+    if sender not in user_states:
+        user_states[sender] = {
+            "step": "language_detection",
+            "language": "english",
+            "needs_language_confirmation": False,
+            "registered": False,
+            "full_name": None,
+            "address": None,
+            "conversation_history": []
+        }
+        save_user_states()
+    
+    # Extract message and media
+    prompt = ""
+    media_url = None
+    media_type = None
+    
+    if data["type"] == "text":
+        prompt = data["text"]["body"]
+    elif data["type"] == "image":
+        media_type = "image"
+        media_url = data["image"]["id"]
+        # For WhatsApp, we need to download the image using the Media API
+        prompt = "[Image received]"
+    
+    # Save to conversation history
+    save_user_conversation(sender, "user", prompt if prompt else "[Media message]")
+    
+    # Handle based on current state
+    handle_conversation_state(sender, prompt, phone_id, media_url, media_type)
+    
+    # Daily report and cleanup
+    if db:
+        scheduler.enterabs(report_time.timestamp(), 1, create_report, (phone_id,))
+        scheduler.run(blocking=False)
+        delete_old_chats()
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -837,39 +709,18 @@ def webhook():
     elif request.method == "POST":
         try:
             data = request.get_json()
-            logging.info(f"Received webhook data: {json.dumps(data, indent=2)}")
+            entry = data["entry"][0]
+            changes = entry["changes"][0]
+            value = changes["value"]
             
-            # Check if the data has the expected structure
-            if "entry" in data and len(data["entry"]) > 0:
-                entry = data["entry"][0]
-                
-                if "changes" in entry and len(entry["changes"]) > 0:
-                    changes = entry["changes"][0]
-                    value = changes["value"]
-                    
-                    # Check if messages exist in the webhook data
-                    if "messages" in value and len(value["messages"]) > 0:
-                        message_data = value["messages"][0]
-                        
-                        # Get the phone number ID from metadata
-                        if "metadata" in value and "phone_number_id" in value["metadata"]:
-                            phone_id = value["metadata"]["phone_number_id"]
-                            message_handler(message_data, phone_id)
-                        else:
-                            logging.error("No phone_number_id found in metadata")
-                    else:
-                        logging.info("No messages found in webhook data")
-                else:
-                    logging.info("No changes found in entry")
-            else:
-                logging.info("No entry found in webhook data")
-                
+            # Check if messages exist in the webhook data
+            if "messages" in value:
+                message_data = value["messages"][0]
+                phone_id = value["metadata"]["phone_number_id"]
+                message_handler(message_data, phone_id)
         except Exception as e:
             logging.error(f"Error in webhook: {e}")
-            logging.error(f"Error type: {type(e)}")
-            logging.error(f"Webhook data that caused error: {data if 'data' in locals() else 'No data'}")
         return jsonify({"status": "ok"}), 200
-
 
 @app.route("/download_media/<media_id>", methods=["GET"])
 def download_media(media_id):
@@ -890,18 +741,18 @@ def download_media(media_id):
             media_response.raise_for_status()
             
             # Save the media to a temporary file
-            file_path = f"/tmp/{media_id}.jpg"
-            with open(file_path, 'wb') as f:
+            media_path = f"/tmp/{media_id}.jpg"
+            with open(media_path, 'wb') as f:
                 f.write(media_response.content)
             
-            return jsonify({"success": True, "file_path": file_path})
+            return jsonify({"success": True, "path": media_path})
         else:
-            return jsonify({"success": False, "error": "No URL found"})
+            return jsonify({"success": False, "error": "No URL found in media data"})
     except Exception as e:
         logging.error(f"Error downloading media: {e}")
         return jsonify({"success": False, "error": str(e)})
 
 if __name__ == "__main__":
-    # Load user states on startup
+    # Load states at startup
     load_user_states()
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(debug=True, port=8000)
