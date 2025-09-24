@@ -17,8 +17,7 @@ import redis
 import json
 import re
 import base64
-
-# NEW imports for Google Application Default Credentials (ADC)
+from google.auth import default
 import google.auth
 from google.auth.transport.requests import Request
 
