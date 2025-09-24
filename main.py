@@ -411,8 +411,9 @@ def download_whatsapp_media(media_id, file_path):
         logging.error(f"Error downloading WhatsApp media (media_id={media_id}): {e}")
         return False
 
+
 def stage_cervical_cancer(image_path):
-    """Stage cervical cancer using Vertex AI dedicated endpoint with MedSigLip model"""
+    """Stage cervical cancer using Vertex AI MedSigLip model with correct payload structure"""
     if not vertex_ai_client:
         return {
             "stage": "Error",
@@ -425,16 +426,20 @@ def stage_cervical_cancer(image_path):
         # Read and encode the image
         with open(image_path, "rb") as f:
             image_data = f.read()
-        
-        # Prepare the prediction instance for MedSigLip model
-        # MedSigLip typically expects base64 encoded image
+        encoded_image = base64.b64encode(image_data).decode("utf-8")
+
+        # ✅ Correct payload format based on model spec
         instance = {
-            "content": base64.b64encode(image_data).decode("utf-8")
+            "image": {
+                "input_bytes": encoded_image
+            },
+            # You can include a text prompt for context (optional)
+            "text": "A cervical VIA image for cancer staging"
         }
         
-        # Make prediction using the dedicated endpoint
         prediction_result = vertex_ai_client.predict([instance])
         
+        # Handle prediction errors
         if "error" in prediction_result:
             return {
                 "stage": "Error",
@@ -442,23 +447,18 @@ def stage_cervical_cancer(image_path):
                 "success": False,
                 "error": prediction_result["error"]
             }
-        
-        # Process the prediction results for MedSigLip model
-        # Adjust these keys based on your MedSigLip model's actual output format
+
+        # ✅ Parse the prediction response
         if "predictions" in prediction_result and len(prediction_result["predictions"]) > 0:
             results = prediction_result["predictions"][0]
             
-            # MedSigLip model output structure may vary - adjust accordingly
             if isinstance(results, dict):
-                # If results are a dictionary with stage/confidence
                 stage = results.get('stage', results.get('class', results.get('prediction', 'Unknown')))
                 confidence = results.get('confidence', results.get('score', results.get('probability', 0)))
             elif isinstance(results, list):
-                # If results are a list of predictions
                 stage = "Stage " + str(results[0]) if results else "Unknown"
                 confidence = results[1] if len(results) > 1 else 0
             else:
-                # Fallback for unknown format
                 stage = str(results)
                 confidence = 0.5
             
@@ -468,7 +468,6 @@ def stage_cervical_cancer(image_path):
                 "success": True
             }
         elif "outputs" in prediction_result:
-            # Alternative output format
             outputs = prediction_result["outputs"]
             stage = outputs[0] if outputs else "Unknown"
             confidence = outputs[1] if len(outputs) > 1 else 0.5
@@ -495,6 +494,7 @@ def stage_cervical_cancer(image_path):
             "success": False,
             "error": str(e)
         }
+
 
 # Database setup (optional)
 db = False
