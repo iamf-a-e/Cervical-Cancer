@@ -95,9 +95,10 @@ class VertexAIClient:
 
         # Build the correct endpoint base URL
         self.base_url = (
-            f"https://{location}-aiplatform.googleapis.com/v1/projects/"
+            f"https://{endpoint_id}.{location}-519460264942.prediction.vertexai.goog/v1/projects/"
             f"{project_id}/locations/{location}/endpoints/{endpoint_id}:predict"
         )
+
 
         # Get default ADC credentials
         self.credentials, _ = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
