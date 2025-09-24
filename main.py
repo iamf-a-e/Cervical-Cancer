@@ -425,17 +425,18 @@ def stage_cervical_cancer(image_path):
         with open(image_path, "rb") as f:
             image_data = f.read()
         
-        # Prepare the prediction instance with the correct key 'input_bytes'
+        # Prepare the prediction instance with the correct 'image' and 'text' keys
         instance = {
             "image": {
                 "input_bytes": base64.b64encode(image_data).decode('utf-8')
-            }
+            },
+            # Add a descriptive text prompt as required by the model
+            "text": "A cervical image showing possible abnormalities."
         }
         
         # Make prediction using the dedicated endpoint
         prediction_result = vertex_ai_client.predict([instance])
-        
-        
+       
         if "error" in prediction_result:
             return {
                 "stage": "Error",
