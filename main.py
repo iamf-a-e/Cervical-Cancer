@@ -13,7 +13,6 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from google.api_core.exceptions import ResourceExhausted
 from training import products, instructions, cervical_cancer_data
-import redis
 import json
 import re
 import base64
@@ -39,30 +38,88 @@ if service_account_b64:
 else:
     logging.warning("⚠️ GCP_SERVICE_ACCOUNT_BASE64 not set. Vertex AI may fail to authenticate.")
 
-# Initialize Redis connection for Upstash
-redis_url = os.environ.get("UPSTASH_REDIS_URL")
-redis_token = os.environ.get("UPSTASH_REDIS_TOKEN")
+# --------------------------------------------------------------------------------
+# ✅ Redis Upstash REST API Client
+# --------------------------------------------------------------------------------
+class UpstashRedisClient:
+    def __init__(self, url, token):
+        self.url = url
+        self.token = token
+        self.headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+    
+    def _make_request(self, method, command, *args):
+        """Make REST API request to Upstash Redis"""
+        payload = {
+            "command": command.upper(),
+            "args": list(args)
+        }
+        
+        try:
+            response = requests.request(
+                method, 
+                self.url, 
+                headers=self.headers, 
+                json=payload,
+                timeout=10
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Upstash Redis API error: {e}")
+            return None
+    
+    def setex(self, key, expiry, value):
+        """Set key with expiry time"""
+        # Convert timedelta to seconds
+        if isinstance(expiry, timedelta):
+            expiry_seconds = int(expiry.total_seconds())
+        else:
+            expiry_seconds = expiry
+        
+        result = self._make_request("POST", "SETEX", key, expiry_seconds, value)
+        return result is not None and result.get("result") == "OK"
+    
+    def get(self, key):
+        """Get value by key"""
+        result = self._make_request("POST", "GET", key)
+        return result.get("result") if result else None
+    
+    def keys(self, pattern):
+        """Get keys matching pattern"""
+        result = self._make_request("POST", "KEYS", pattern)
+        return result.get("result") if result else []
+    
+    def delete(self, *keys):
+        """Delete keys"""
+        result = self._make_request("POST", "DEL", *keys)
+        return result.get("result") if result else 0
+    
+    def ping(self):
+        """Test connection"""
+        result = self._make_request("POST", "PING")
+        return result is not None and result.get("result") == "PONG"
 
-if redis_url and redis_token:
+# Initialize Upstash Redis connection
+upstash_redis_url = os.environ.get("UPSTASH_REDIS_REST_URL")
+upstash_redis_token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+
+if upstash_redis_url and upstash_redis_token:
     try:
-        # Use from_url for better Upstash Redis compatibility
-        redis_client = redis.from_url(
-            redis_url,
-            password=redis_token,
-            ssl=True,
-            decode_responses=True,
-            socket_connect_timeout=5,
-            socket_timeout=5
-        )
-        # Test the connection
-        redis_client.ping()
-        logging.info("Successfully connected to Upstash Redis")
+        redis_client = UpstashRedisClient(upstash_redis_url, upstash_redis_token)
+        if redis_client.ping():
+            logging.info("✅ Successfully connected to Upstash Redis via REST API")
+        else:
+            logging.error("❌ Failed to ping Upstash Redis")
+            redis_client = None
     except Exception as e:
-        logging.error(f"Failed to connect to Upstash Redis: {e}")
+        logging.error(f"❌ Failed to initialize Upstash Redis client: {e}")
         redis_client = None
 else:
     redis_client = None
-    logging.warning("UPSTASH_REDIS_URL or UPSTASH_REDIS_TOKEN not set, Redis functionality disabled")
+    logging.warning("⚠️ UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN not set, Redis functionality disabled")
 
 # Global user states dictionary (fallback)
 user_states = {}
@@ -98,7 +155,6 @@ class VertexAIClient:
             f"https://{endpoint_id}.{location}-519460264942.prediction.vertexai.goog/v1/projects/"
             f"{project_id}/locations/{location}/endpoints/{endpoint_id}:predict"
         )
-
 
         # Get default ADC credentials
         self.credentials, _ = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
@@ -748,7 +804,7 @@ def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_ty
         except ResourceExhausted as e:
             logging.error(f"Gemini API quota exceeded: {e}")
             if lang == "shona":
-                send("Ndine urombo, tiri kushandisa traffic yakawanda. Edza zvakare gare gare.", sender, phone_id)
+                send("Ndine urombo, tiri kushandisa traffic yakawandi. Edza zvakare gare gare.", sender, phone_id)
             else:
                 send("Sorry, we're experiencing high traffic. Please try again later.", sender, phone_id)
     else:
@@ -805,98 +861,75 @@ def message_handler(data, phone_id):
         logging.warning(f"Unsupported message type: {data['type']}")
     
     # Save user message to conversation history
-    save_user_conversation(sender, "user", prompt)
+    save_user_conversation(sender, "user", prompt if prompt != "IMAGE_UPLOADED" else "[Image uploaded]")
     
     # Handle the conversation based on current state
     handle_conversation_state(sender, prompt, phone_id, media_url, media_type)
-    
-    # Save updated state to Redis
-    save_user_state(sender, user_states[sender])
 
-@app.route('/', methods=['GET'])
+@app.route("/", methods=["GET"])
 def home():
-    return render_template('connected.html')
+    return render_template("index.html")
 
-@app.route('/webhook', methods=['GET'])
+@app.route("/webhook", methods=["GET", "POST"])
 def webhook():
-    try:
-        if request.args.get('hub.verify_token') == 'my_verify_token':
-            return request.args.get('hub.challenge')
+    if request.method == "GET":
+        mode = request.args.get("hub.mode")
+        token = request.args.get("hub.verify_token")
+        challenge = request.args.get("hub.challenge")
+        if mode == "subscribe" and token == wa_token:
+            return challenge
         else:
-            return 'Error, wrong validation token'
-    except Exception as e:
-        logging.error(f"Webhook verification error: {e}")
-        return 'Error'
-
-@app.route('/webhook', methods=['POST'])
-def webhook_handle():
-    try:
+            return "Verification failed", 403
+    else:
         data = request.get_json()
-        logging.info(f"Received webhook data: {json.dumps(data, indent=2)}")
-        
-        if data.get("object") == "whatsapp_business_account":
+        logging.info(f"Received webhook data: {json.dumps(data)}")
+        if data.get("object") == "whatsapp_business_account"):
             for entry in data.get("entry", []):
                 for change in entry.get("changes", []):
-                    if change.get("field") == "messages":
-                        value = change.get("value", {})
-                        if "messages" in value:
-                            for message in value["messages"]:
-                                message_handler(message, phone_id)
-        return jsonify({"status": "success"}), 200
-    except Exception as e:
-        logging.error(f"Webhook handling error: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+                    value = change.get("value")
+                    if value:
+                        for message in value.get("messages", []):
+                            message_handler(message, phone_id)
+        return "OK", 200
 
-@app.route('/health', methods=['GET'])
+@app.route("/health", methods=["GET"])
 def health_check():
     """Health check endpoint"""
-    status = {
+    redis_status = "connected" if redis_client and redis_client.ping() else "disconnected"
+    return jsonify({
         "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "redis_connected": redis_client is not None,
-        "vertex_ai_configured": vertex_ai_client is not None,
-        "vertex_ai_project": VERTEX_AI_PROJECT is not None,
-        "vertex_ai_endpoint": VERTEX_AI_ENDPOINT_ID is not None,
-        "gemini_configured": gen_api is not None,
-        "whatsapp_configured": wa_token is not None and phone_id is not None
-    }
-    
-    # Add more detailed Vertex AI info
-    if vertex_ai_client:
-        status["vertex_ai_details"] = {
-            "project_id": vertex_ai_client.project_id,
-            "endpoint_id": vertex_ai_client.endpoint_id,
-            "base_url": vertex_ai_client.base_url
-        }
-    
-    # Test Redis connection
-    if redis_client:
-        try:
-            redis_client.ping()
-            status["redis_status"] = "connected"
-        except Exception as e:
-            status["redis_status"] = f"error: {str(e)}"
-            status["status"] = "degraded"
-    
-    return jsonify(status)
+        "redis": redis_status,
+        "vertex_ai": "connected" if vertex_ai_client else "disconnected",
+        "gemini": "configured" if gen_api else "not_configured",
+        "whatsapp": "configured" if wa_token and phone_id else "not_configured"
+    })
 
-@app.route('/test-vertex', methods=['GET'])
-def test_vertex():
-    """Test Vertex AI connection"""
-    if not vertex_ai_client:
-        return jsonify({"error": "Vertex AI client not configured"}), 500
+@app.route("/debug/state/<sender>", methods=["GET"])
+def debug_state(sender):
+    """Debug endpoint to check user state"""
+    state = get_user_state(sender)
+    conversation = get_user_conversation(sender)
+    return jsonify({
+        "sender": sender,
+        "state": state,
+        "conversation_length": len(conversation) if conversation else 0,
+        "conversation_preview": conversation[-5:] if conversation else []
+    })
+
+@app.route("/debug/redis/keys", methods=["GET"])
+def debug_redis_keys():
+    """Debug endpoint to check Redis keys"""
+    if not redis_client:
+        return jsonify({"error": "Redis client not available"})
     
-    try:
-        # Simple test payload
-        test_payload = [{"test": "connection"}]
-        result = vertex_ai_client.predict(test_payload)
-        return jsonify({"status": "success", "result": result})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    keys = redis_client.keys("*")
+    return jsonify({
+        "keys": keys,
+        "count": len(keys)
+    })
 
-# Load user states on startup
-load_user_states()
-
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+if __name__ == "__main__":
+    # Load initial user states from Redis on startup
+    load_user_states()
+    logging.info("Server starting...")
+    app.run(host="0.0.0.0", port=5000, debug=True)
