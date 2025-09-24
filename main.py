@@ -20,6 +20,8 @@ import base64
 from google.auth import default
 import google.auth
 from google.auth.transport.requests import Request
+import urllib.parse
+import threading
 
 logging.basicConfig(level=logging.INFO)
 
@@ -39,30 +41,96 @@ if service_account_b64:
 else:
     logging.warning("⚠️ GCP_SERVICE_ACCOUNT_BASE64 not set. Vertex AI may fail to authenticate.")
 
-# Initialize Redis connection for Upstash
-redis_url = os.environ.get("UPSTASH_REDIS_URL")
+# --------------------------------------------------------------------------------
+# ✅ Improved Redis Connection for Upstash
+# --------------------------------------------------------------------------------
+redis_url = os.environ.get("REDIS_URL")
 redis_token = os.environ.get("UPSTASH_REDIS_TOKEN")
 
-if redis_url and redis_token:
-    try:
-        # Use from_url for better Upstash Redis compatibility
-        redis_client = redis.from_url(
-            redis_url,
-            password=redis_token,
-            ssl=True,
-            decode_responses=True,
-            socket_connect_timeout=5,
-            socket_timeout=5
-        )
-        # Test the connection
-        redis_client.ping()
-        logging.info("Successfully connected to Upstash Redis")
-    except Exception as e:
-        logging.error(f"Failed to connect to Upstash Redis: {e}")
-        redis_client = None
-else:
-    redis_client = None
-    logging.warning("UPSTASH_REDIS_URL or UPSTASH_REDIS_TOKEN not set, Redis functionality disabled")
+def setup_redis_connection():
+    """Setup Redis connection with Upstash compatibility"""
+    if redis_url and redis_token:
+        try:
+            # Method 1: Try direct Upstash connection first
+            if 'upstash.io' in redis_url:
+                # Upstash provides a REST API-like URL, convert it
+                if redis_url.startswith('https://'):
+                    # Extract host from Upstash URL
+                    parsed = urllib.parse.urlparse(redis_url)
+                    host = parsed.hostname
+                    port = 6379  # Default Redis port
+                    
+                    redis_client = redis.Redis(
+                        host=host,
+                        port=port,
+                        password=redis_token,
+                        ssl=True,
+                        ssl_cert_reqs=None,  # Important for Upstash
+                        decode_responses=True,
+                        socket_connect_timeout=10,
+                        socket_timeout=10,
+                        retry_on_timeout=True
+                    )
+                else:
+                    # Try with rediss:// scheme
+                    formatted_url = redis_url
+                    if not formatted_url.startswith(('redis://', 'rediss://')):
+                        formatted_url = f"rediss://{redis_token}@{redis_url}:6379"
+                    
+                    redis_client = redis.from_url(
+                        formatted_url,
+                        decode_responses=True,
+                        socket_connect_timeout=10,
+                        socket_timeout=10,
+                        retry_on_timeout=True
+                    )
+            else:
+                # Standard Redis URL
+                redis_client = redis.from_url(
+                    redis_url,
+                    password=redis_token,
+                    ssl=True,
+                    decode_responses=True,
+                    socket_connect_timeout=10,
+                    socket_timeout=10,
+                    retry_on_timeout=True
+                )
+            
+            # Test the connection
+            redis_client.ping()
+            logging.info("✅ Successfully connected to Upstash Redis")
+            return redis_client
+            
+        except Exception as e:
+            logging.error(f"❌ Failed to connect to Upstash Redis: {e}")
+            
+            # Method 2: Fallback to basic connection
+            try:
+                logging.info("🔄 Trying alternative Redis connection method...")
+                if 'upstash.io' in redis_url:
+                    parsed = urllib.parse.urlparse(redis_url)
+                    host = parsed.hostname
+                    
+                    redis_client = redis.Redis(
+                        host=host,
+                        port=6379,
+                        password=redis_token,
+                        ssl=True,
+                        ssl_cert_reqs=None,
+                        decode_responses=True,
+                        socket_connect_timeout=10,
+                        socket_timeout=10
+                    )
+                    redis_client.ping()
+                    logging.info("✅ Connected using alternative method")
+                    return redis_client
+            except Exception as e2:
+                logging.error(f"❌ Alternative connection also failed: {e2}")
+    
+    logging.warning("⚠️ Redis functionality disabled")
+    return None
+
+redis_client = setup_redis_connection()
 
 # Global user states dictionary (fallback)
 user_states = {}
@@ -99,7 +167,6 @@ class VertexAIClient:
             f"{project_id}/locations/{location}/endpoints/{endpoint_id}:predict"
         )
 
-
         # Get default ADC credentials
         self.credentials, _ = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
         if not self.credentials.valid:
@@ -132,7 +199,6 @@ class VertexAIClient:
             logging.error(f"Vertex AI request failed: {e}")
             raise
 
-
 vertex_ai_client = None
 if VERTEX_AI_PROJECT and VERTEX_AI_ENDPOINT_ID:
     try:
@@ -141,13 +207,44 @@ if VERTEX_AI_PROJECT and VERTEX_AI_ENDPOINT_ID:
             VERTEX_AI_ENDPOINT_ID,
             VERTEX_AI_REGION
         )
-        logging.info("Vertex AI client initialized successfully with ADC authentication")
+        logging.info("✅ Vertex AI client initialized successfully with ADC authentication")
     except Exception as e:
-        logging.error(f"Failed to initialize Vertex AI client: {e}")
+        logging.error(f"❌ Failed to initialize Vertex AI client: {e}")
         vertex_ai_client = None
 else:
-    logging.warning("Vertex AI project, endpoint ID not set, cervical cancer staging disabled")
+    logging.warning("⚠️ Vertex AI project, endpoint ID not set, cervical cancer staging disabled")
 
+# --------------------------------------------------------------------------------
+# ✅ Environment Validation
+# --------------------------------------------------------------------------------
+
+def validate_environment():
+    """Validate required environment variables"""
+    required_vars = {
+        "WA_TOKEN": wa_token,
+        "PHONE_ID": phone_id,
+        "GEN_API": gen_api,
+    }
+    
+    missing_vars = [var for var, value in required_vars.items() if not value]
+    if missing_vars:
+        logging.warning(f"⚠️ Missing environment variables: {missing_vars}")
+    else:
+        logging.info("✅ All required environment variables are set")
+    
+    # Check optional but important vars
+    optional_vars = {
+        "REDIS_URL": redis_url,
+        "VERTEX_AI_PROJECT": VERTEX_AI_PROJECT,
+        "OWNER_PHONE": owner_phone,
+    }
+    
+    for var, value in optional_vars.items():
+        if not value:
+            logging.info(f"ℹ️ Optional variable not set: {var}")
+
+# Validate environment on startup
+validate_environment()
     
 app = Flask(__name__)
 genai.configure(api_key=gen_api)
@@ -158,6 +255,13 @@ class CustomURLExtract(URLExtract):
         return os.path.join(cache_dir, "tlds-alpha-by-domain.txt")
 
 extractor = CustomURLExtract(limit=1)
+
+# Initialize TLD cache
+try:
+    extractor.update()
+    logging.info("✅ TLD cache updated successfully")
+except Exception as e:
+    logging.warning(f"⚠️ Could not update TLD cache: {e}. Using built-in fallback.")
 
 generation_config = {
     "temperature": 1,
@@ -186,9 +290,9 @@ def save_user_states():
             # Save each user state individually for better performance
             for sender, state in user_states.items():
                 redis_client.setex(f"user_state:{sender}", timedelta(days=30), json.dumps(state))
-            logging.info(f"User states saved to Redis: {len(user_states)} states")
+            logging.info(f"✅ User states saved to Redis: {len(user_states)} states")
         except Exception as e:
-            logging.error(f"Error saving user states to Redis: {e}")
+            logging.error(f"❌ Error saving user states to Redis: {e}")
 
 def load_user_states():
     """Load user states from Redis"""
@@ -208,16 +312,16 @@ def load_user_states():
                         if isinstance(state, dict) and "step" in state:
                             user_states[sender] = state
                         else:
-                            logging.warning(f"Invalid state structure for {sender}: {state}")
+                            logging.warning(f"⚠️ Invalid state structure for {sender}: {state}")
                     except json.JSONDecodeError as e:
-                        logging.error(f"Error decoding JSON for {sender}: {e}")
-            logging.info(f"Loaded {len(user_states)} user states from Redis")
+                        logging.error(f"❌ Error decoding JSON for {sender}: {e}")
+            logging.info(f"✅ Loaded {len(user_states)} user states from Redis")
         except Exception as e:
-            logging.error(f"Error loading user states from Redis: {e}")
+            logging.error(f"❌ Error loading user states from Redis: {e}")
             user_states = {}
     else:
         user_states = {}
-        logging.warning("Redis client not available, using in-memory storage only")
+        logging.warning("⚠️ Redis client not available, using in-memory storage only")
 
 def get_user_conversation(sender):
     """Get user conversation history from Redis"""
@@ -226,7 +330,7 @@ def get_user_conversation(sender):
             history = redis_client.get(f"conversation:{sender}")
             return json.loads(history) if history else []
         except Exception as e:
-            logging.error(f"Error getting conversation from Redis: {e}")
+            logging.error(f"❌ Error getting conversation from Redis: {e}")
             return []
     return []
 
@@ -244,14 +348,16 @@ def save_user_conversation(sender, role, message):
             if len(conversation) > 100:
                 conversation = conversation[-100:]
             redis_client.setex(f"conversation:{sender}", timedelta(days=30), json.dumps(conversation))
-            logging.debug(f"Saved conversation for {sender}")
+            logging.debug(f"💾 Saved conversation for {sender}")
         except Exception as e:
-            logging.error(f"Error saving conversation to Redis: {e}")
+            logging.error(f"❌ Error saving conversation to Redis: {e}")
 
 def save_user_state(sender, state):
-    """Save individual user state to Redis with validation"""
+    """Save individual user state to Redis with validation and retry"""
     if not redis_client:
-        logging.debug("Redis client not available, skipping state save")
+        # Fallback to in-memory storage
+        user_states[sender] = state
+        logging.debug("💾 Redis client not available, using in-memory storage")
         return
         
     try:
@@ -262,16 +368,18 @@ def save_user_state(sender, state):
                 timedelta(days=30), 
                 json.dumps(state)
             )
-            logging.debug(f"Saved state for {sender}: {state['step']}")
+            logging.debug(f"💾 Saved state for {sender}: {state['step']}")
         else:
-            logging.error(f"Invalid state structure for {sender}: {state}")
+            logging.error(f"❌ Invalid state structure for {sender}: {state}")
     except Exception as e:
-        logging.error(f"Error saving user state for {sender} to Redis: {e}")
+        logging.error(f"❌ Error saving user state for {sender} to Redis: {e}")
+        # Fallback to in-memory storage
+        user_states[sender] = state
 
 def get_user_state(sender):
     """Get individual user state from Redis with better error handling"""
     if not redis_client:
-        return None
+        return user_states.get(sender)
         
     try:
         state_data = redis_client.get(f"user_state:{sender}")
@@ -279,15 +387,15 @@ def get_user_state(sender):
             state = json.loads(state_data)
             # Validate the state structure
             if isinstance(state, dict) and "step" in state:
-                logging.debug(f"Loaded state for {sender}: {state['step']}")
+                logging.debug(f"📥 Loaded state for {sender}: {state['step']}")
                 return state
             else:
-                logging.warning(f"Invalid state structure for {sender}: {state}")
+                logging.warning(f"⚠️ Invalid state structure for {sender}: {state}")
                 return None
         return None
     except Exception as e:
-        logging.error(f"Error getting user state for {sender} from Redis: {e}")
-        return None
+        logging.error(f"❌ Error getting user state for {sender} from Redis: {e}")
+        return user_states.get(sender)
 
 def detect_language(message):
     """Detect language based on keywords in the message"""
@@ -327,9 +435,9 @@ def send(answer, sender, phone_id):
     try:
         response = requests.post(url, headers=headers, json=data)
         response.raise_for_status()
-        logging.debug(f"Message sent to {sender}")
+        logging.debug(f"📤 Message sent to {sender}")
     except Exception as e:
-        logging.error(f"Error sending message to {sender}: {e}")
+        logging.error(f"❌ Error sending message to {sender}: {e}")
         response = None
 
     # Save bot response to conversation history
@@ -353,17 +461,17 @@ def download_image(url, file_path):
         response.raise_for_status()
         with open(file_path, 'wb') as f:
             f.write(response.content)
-        logging.debug(f"Image downloaded to {file_path}")
+        logging.debug(f"📥 Image downloaded to {file_path}")
         return True
     except Exception as e:
-        logging.error(f"Error downloading image: {e}")
+        logging.error(f"❌ Error downloading image: {e}")
         return False
 
 def download_whatsapp_media(media_id, file_path):
     """Download WhatsApp media by media_id using the Graph API."""
     try:
         if not media_id:
-            logging.error("download_whatsapp_media called with empty media_id")
+            logging.error("❌ download_whatsapp_media called with empty media_id")
             return False
 
         headers = {
@@ -372,28 +480,28 @@ def download_whatsapp_media(media_id, file_path):
 
         # Step 1: Get media metadata to retrieve the actual CDN URL
         meta_url = f"https://graph.facebook.com/v19.0/{media_id}"
-        logging.info(f"Fetching media metadata for media_id={media_id}")
+        logging.info(f"📥 Fetching media metadata for media_id={media_id}")
         meta_resp = requests.get(meta_url, headers=headers, timeout=20)
         meta_resp.raise_for_status()
         media_data = meta_resp.json()
 
         media_url = media_data.get("url")
         if not media_url:
-            logging.error(f"No media URL found for media_id={media_id}. Response: {media_data}")
+            logging.error(f"❌ No media URL found for media_id={media_id}. Response: {media_data}")
             return False
 
         # Step 2: Download the media bytes from the returned URL
-        logging.info(f"Downloading media content from URL for media_id={media_id}")
+        logging.info(f"📥 Downloading media content from URL for media_id={media_id}")
         media_resp = requests.get(media_url, headers=headers, timeout=60)
         media_resp.raise_for_status()
 
         with open(file_path, 'wb') as f:
             f.write(media_resp.content)
 
-        logging.info(f"Media saved to {file_path} for media_id={media_id}")
+        logging.info(f"✅ Media saved to {file_path} for media_id={media_id}")
         return True
     except Exception as e:
-        logging.error(f"Error downloading WhatsApp media (media_id={media_id}): {e}")
+        logging.error(f"❌ Error downloading WhatsApp media (media_id={media_id}): {e}")
         return False
 
 def stage_cervical_cancer(image_path):
@@ -420,12 +528,12 @@ def stage_cervical_cancer(image_path):
             ]
         }
 
-        logging.info(f"Vertex request payload: {json.dumps(payload)[:500]}...")
+        logging.info(f"🔬 Vertex request payload: {json.dumps(payload)[:500]}...")
 
         prediction_result = vertex_ai_client.predict(payload)
 
         if "predictions" not in prediction_result:
-            logging.error(f"Unexpected Vertex response: {prediction_result}")
+            logging.error(f"❌ Unexpected Vertex response: {prediction_result}")
             return {
                 "stage": "Error",
                 "confidence": 0,
@@ -452,14 +560,13 @@ def stage_cervical_cancer(image_path):
         }
 
     except Exception as e:
-        logging.error(f"Error in cervical cancer staging: {e}")
+        logging.error(f"❌ Error in cervical cancer staging: {e}")
         return {
             "stage": "Error",
             "confidence": 0,
             "success": False,
             "error": str(e)
         }
-
 
 # Database setup (optional)
 db = False
@@ -482,19 +589,19 @@ if os.environ.get("DB_URL"):
                 Message = Column(String, nullable=False)
                 Chat_time = Column(DateTime, default=datetime.utcnow)
 
-            logging.info("Creating tables if they do not exist...")
+            logging.info("🗃️ Creating tables if they do not exist...")
             Base.metadata.create_all(engine)
 
             def insert_chat(sender, message):
-                logging.info("Inserting chat into database")
+                logging.info("💾 Inserting chat into database")
                 try:
                     session = Session()
                     chat = Chat(Sender=sender, Message=message)
                     session.add(chat)
                     session.commit()
-                    logging.info("Chat inserted successfully")
+                    logging.info("✅ Chat inserted successfully")
                 except Exception as e:
-                    logging.error(f"Error inserting chat: {e}")
+                    logging.error(f"❌ Error inserting chat: {e}")
                     session.rollback()
                 finally:
                     session.close()
@@ -505,7 +612,7 @@ if os.environ.get("DB_URL"):
                     chats = session.query(Chat.Message).filter(Chat.Sender == sender).all()
                     return [chat[0] for chat in chats]
                 except Exception as e:
-                    logging.error(f"Error getting chats: {e}")
+                    logging.error(f"❌ Error getting chats: {e}")
                     return []
                 finally:
                     session.close()
@@ -516,15 +623,15 @@ if os.environ.get("DB_URL"):
                     cutoff_date = datetime.now() - timedelta(days=14)
                     session.query(Chat).filter(Chat.Chat_time < cutoff_date).delete()
                     session.commit()
-                    logging.info("Old chats deleted successfully")
+                    logging.info("✅ Old chats deleted successfully")
                 except Exception as e:
-                    logging.error(f"Error deleting old chats: {e}")
+                    logging.error(f"❌ Error deleting old chats: {e}")
                     session.rollback()
                 finally:
                     session.close()
 
             def create_report(phone_id):
-                logging.info("Creating report")
+                logging.info("📊 Creating report")
                 try:
                     today = datetime.today().strftime('%d-%m-%Y')
                     session = Session()
@@ -533,18 +640,18 @@ if os.environ.get("DB_URL"):
                         chats = '\n\n'.join([chat[0] for chat in query])
                         send(chats, owner_phone, phone_id)
                 except Exception as e:
-                    logging.error(f"Error creating report: {e}")
+                    logging.error(f"❌ Error creating report: {e}")
                 finally:
                     session.close()
         else:
-            logging.warning("DB_URL appears to be a Redis URL, SQLAlchemy database disabled")
+            logging.warning("⚠️ DB_URL appears to be a Redis URL, SQLAlchemy database disabled")
             db = False
     except Exception as e:
-        logging.error(f"Error setting up database: {e}")
+        logging.error(f"❌ Error setting up database: {e}")
         db = False
 else:
     db = False
-    logging.info("DB_URL not set, database functionality disabled")
+    logging.info("ℹ️ DB_URL not set, database functionality disabled")
 
 def handle_language_detection(sender, prompt, phone_id):
     """Handle language detection state"""
@@ -706,10 +813,10 @@ def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_ty
     """Handle conversation based on current state"""
     state = user_states.get(sender)
     if not state:
-        logging.error(f"No state found for {sender}")
+        logging.error(f"❌ No state found for {sender}")
         return
     
-    logging.info(f"Processing message from {sender}, current step: {state['step']}")
+    logging.info(f"💬 Processing message from {sender}, current step: {state['step']}")
     
     # Check if we have an image for cervical cancer staging
     if media_type == "image" and state["step"] == "awaiting_image":
@@ -746,7 +853,7 @@ def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_ty
                     send("I'm sorry, I didn't understand that. Could you please rephrase your question?", sender, phone_id)
                     
         except ResourceExhausted as e:
-            logging.error(f"Gemini API quota exceeded: {e}")
+            logging.error(f"❌ Gemini API quota exceeded: {e}")
             if lang == "shona":
                 send("Ndine urombo, tiri kushandisa traffic yakawanda. Edza zvakare gare gare.", sender, phone_id)
             else:
@@ -762,13 +869,13 @@ def message_handler(data, phone_id):
     global user_states
     
     sender = data["from"]
-    logging.info(f"Received message from {sender}")
+    logging.info(f"📩 Received message from {sender}")
     
     # Load user state from Redis with better handling
     state = get_user_state(sender)
     if state:
         user_states[sender] = state
-        logging.info(f"Loaded existing state for {sender}: {state['step']}")
+        logging.info(f"📥 Loaded existing state for {sender}: {state['step']}")
     else:
         # Only initialize if truly new user (not in memory either)
         if sender not in user_states:
@@ -782,9 +889,9 @@ def message_handler(data, phone_id):
                 "conversation_history": []
             }
             save_user_state(sender, user_states[sender])
-            logging.info(f"Created new state for {sender}")
+            logging.info(f"🆕 Created new state for {sender}")
         else:
-            logging.info(f"Using in-memory state for {sender}: {user_states[sender]['step']}")
+            logging.info(f"💾 Using in-memory state for {sender}: {user_states[sender]['step']}")
     
     # Extract message and media
     prompt = ""
@@ -793,16 +900,16 @@ def message_handler(data, phone_id):
     
     if data["type"] == "text":
         prompt = data["text"]["body"]
-        logging.info(f"Text message: {prompt[:100]}...")
+        logging.info(f"💬 Text message: {prompt[:100]}...")
     elif data["type"] == "image":
         media_type = "image"
         media_url = data["image"]["id"]
-        logging.info(f"Image received, media_id: {media_url}")
+        logging.info(f"🖼️ Image received, media_id: {media_url}")
         # Use a placeholder prompt for image processing
         prompt = "IMAGE_UPLOADED"
     else:
         prompt = "UNSUPPORTED_MESSAGE_TYPE"
-        logging.warning(f"Unsupported message type: {data['type']}")
+        logging.warning(f"⚠️ Unsupported message type: {data['type']}")
     
     # Save user message to conversation history
     save_user_conversation(sender, "user", prompt)
@@ -825,14 +932,14 @@ def webhook():
         else:
             return 'Error, wrong validation token'
     except Exception as e:
-        logging.error(f"Webhook verification error: {e}")
+        logging.error(f"❌ Webhook verification error: {e}")
         return 'Error'
 
 @app.route('/webhook', methods=['POST'])
 def webhook_handle():
     try:
         data = request.get_json()
-        logging.info(f"Received webhook data: {json.dumps(data, indent=2)}")
+        logging.info(f"📨 Received webhook data: {json.dumps(data, indent=2)}")
         
         if data.get("object") == "whatsapp_business_account":
             for entry in data.get("entry", []):
@@ -844,7 +951,7 @@ def webhook_handle():
                                 message_handler(message, phone_id)
         return jsonify({"status": "success"}), 200
     except Exception as e:
-        logging.error(f"Webhook handling error: {e}")
+        logging.error(f"❌ Webhook handling error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/health', methods=['GET'])
@@ -858,7 +965,8 @@ def health_check():
         "vertex_ai_project": VERTEX_AI_PROJECT is not None,
         "vertex_ai_endpoint": VERTEX_AI_ENDPOINT_ID is not None,
         "gemini_configured": gen_api is not None,
-        "whatsapp_configured": wa_token is not None and phone_id is not None
+        "whatsapp_configured": wa_token is not None and phone_id is not None,
+        "user_states_count": len(user_states)
     }
     
     # Add more detailed Vertex AI info
@@ -874,6 +982,11 @@ def health_check():
         try:
             redis_client.ping()
             status["redis_status"] = "connected"
+            # Get some Redis stats
+            status["redis_info"] = {
+                "db_size": len(redis_client.keys("*")),
+                "user_states_in_redis": len(redis_client.keys("user_state:*"))
+            }
         except Exception as e:
             status["redis_status"] = f"error: {str(e)}"
             status["status"] = "degraded"
@@ -888,14 +1001,60 @@ def test_vertex():
     
     try:
         # Simple test payload
-        test_payload = [{"test": "connection"}]
+        test_payload = {"instances": [{"test": "connection"}]}
         result = vertex_ai_client.predict(test_payload)
         return jsonify({"status": "success", "result": result})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/test-redis', methods=['GET'])
+def test_redis():
+    """Test Redis connection"""
+    if not redis_client:
+        return jsonify({"error": "Redis client not configured"}), 500
+    
+    try:
+        # Test basic operations
+        test_key = "test:connection"
+        test_value = {"timestamp": datetime.now().isoformat(), "test": "success"}
+        
+        # Set value
+        redis_client.setex(test_key, timedelta(minutes=5), json.dumps(test_value))
+        
+        # Get value
+        retrieved = redis_client.get(test_key)
+        
+        # Get some stats
+        keys_count = len(redis_client.keys("*"))
+        user_states_count = len(redis_client.keys("user_state:*"))
+        
+        return jsonify({
+            "status": "success",
+            "set_get_test": json.loads(retrieved) if retrieved else None,
+            "stats": {
+                "total_keys": keys_count,
+                "user_states": user_states_count
+            }
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # Load user states on startup
 load_user_states()
+
+# Pre-warm the TLD cache in background
+def warmup_tld_cache():
+    try:
+        extractor.update()
+        logging.info("✅ TLD cache warmed up successfully")
+    except Exception as e:
+        logging.warning(f"⚠️ TLD cache warmup failed: {e}")
+
+# Start warmup in background thread
+tld_thread = threading.Thread(target=warmup_tld_cache, daemon=True)
+tld_thread.start()
+
+logging.info("🚀 Application started successfully!")
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
