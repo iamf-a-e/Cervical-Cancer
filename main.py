@@ -17,6 +17,9 @@ import redis
 import json
 import re
 import base64
+import google.auth
+from google.oauth2 import service_account
+from google.auth.transport.requests import Request as GoogleAuthRequest
 
 logging.basicConfig(level=logging.INFO)
 
@@ -57,53 +60,81 @@ name = "Fae"  # The bot will consider this person as its owner or creator
 bot_name = "Rudo"  # This will be the name of your bot, eg: "Hello I am Astro Bot"
 AGENT = "+263719835124"  # Fixed: added quotes to make it a string
 
-# Vertex AI Endpoint Configuration (UPDATED with correct dedicated endpoint format)
+# Vertex AI Endpoint Configuration (UPDATED)
 VERTEX_AI_ENDPOINT_ID = "9216603443274186752"
 VERTEX_AI_REGION = "us-west4"
 VERTEX_AI_PROJECT = os.environ.get("VERTEX_AI_PROJECT")
-# Get MedSigLip API Key from environment
-MEDSIGLIP_API_KEY = os.environ.get("MEDSIGLIP_API")
+# Optional numeric project number for dedicated prediction domain
+VERTEX_AI_PROJECT_NUMBER = os.environ.get("VERTEX_AI_PROJECT_NUMBER")
+# Optional: inline credentials JSON (alternative to GOOGLE_APPLICATION_CREDENTIALS file)
+GOOGLE_APPLICATION_CREDENTIALS_JSON = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
 
 class VertexAIClient:
-    def __init__(self, project_id, endpoint_id, region="us-west4", api_key=None):
+    def __init__(self, project_id, endpoint_id, region="us-west4"):
         self.project_id = project_id
         self.endpoint_id = endpoint_id
         self.region = region
-        self.api_key = api_key
-        
-        # For dedicated endpoints, the URL follows this format:
-        # https://{REGION}-{PROJECT_NUMBER}.prediction.vertexai.goog/v1/projects/{PROJECT_ID}/locations/{REGION}/endpoints/{ENDPOINT_ID}:predict
+
+        # Standard public Vertex AI endpoint
         self.base_url = f"https://{region}-aiplatform.googleapis.com/v1"
-        self.dedicated_endpoint_url = f"https://{region}-{project_id}.prediction.vertexai.goog/v1/projects/{project_id}/locations/{region}/endpoints/{endpoint_id}:predict"
-        
-        logging.info(f"Using dedicated endpoint URL: {self.dedicated_endpoint_url}")
-        
-        # Validate API key
-        if not self.api_key:
-            logging.warning("No MedSigLip API key provided - authentication may fail")
-    
+
+        # Optional dedicated prediction domain requires numeric project number
+        self.dedicated_endpoint_url = None
+        if VERTEX_AI_PROJECT_NUMBER:
+            self.dedicated_endpoint_url = (
+                f"https://{region}-{VERTEX_AI_PROJECT_NUMBER}.prediction.vertexai.goog/v1/"
+                f"projects/{project_id}/locations/{region}/endpoints/{endpoint_id}:predict"
+            )
+            logging.info(f"Using dedicated endpoint URL: {self.dedicated_endpoint_url}")
+
+        # Initialize Google credentials (ADC)
+        self.credentials = None
+        try:
+            if GOOGLE_APPLICATION_CREDENTIALS_JSON:
+                info = json.loads(GOOGLE_APPLICATION_CREDENTIALS_JSON)
+                self.credentials = service_account.Credentials.from_service_account_info(
+                    info,
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
+                )
+                logging.info("Loaded Google credentials from GOOGLE_APPLICATION_CREDENTIALS_JSON")
+            else:
+                self.credentials, _ = google.auth.default(
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                )
+                logging.info("Loaded Application Default Credentials for Google auth")
+        except Exception as e:
+            logging.error(f"Failed to load Google credentials: {e}")
+            self.credentials = None
+
     def get_auth_header(self):
-        """Get authentication header using API key"""
-        if self.api_key:
-            return {"Authorization": f"Bearer {self.api_key}"}
-        else:
-            logging.error("No API key available for MedSigLip authentication")
+        """Get OAuth2 Bearer token header from Google credentials."""
+        if not self.credentials:
+            logging.error("Google credentials not available for Vertex AI authentication")
+            return {}
+        try:
+            if not self.credentials.valid:
+                self.credentials.refresh(GoogleAuthRequest())
+            return {"Authorization": f"Bearer {self.credentials.token}"}
+        except Exception as e:
+            logging.error(f"Failed to refresh Google credentials: {e}")
             return {}
     
     def predict(self, instances):
-        """Make prediction using Vertex AI dedicated endpoint with API key authentication"""
-        # Try dedicated endpoint first, then fallback to standard REST API
-        urls_to_try = [
-            self.dedicated_endpoint_url,
+        """Make prediction using Vertex AI endpoint with OAuth2 authentication"""
+        # Try dedicated endpoint (if configured) first, then fallback to standard REST API
+        urls_to_try = []
+        if self.dedicated_endpoint_url:
+            urls_to_try.append(self.dedicated_endpoint_url)
+        urls_to_try.append(
             f"{self.base_url}/projects/{self.project_id}/locations/{self.region}/endpoints/{self.endpoint_id}:predict"
-        ]
+        )
         
         for i, url in enumerate(urls_to_try):
             headers = {
                 "Content-Type": "application/json"
             }
             
-            # Add API key authentication
+            # Add OAuth2 authentication
             auth_headers = self.get_auth_header()
             headers.update(auth_headers)
             
@@ -124,35 +155,41 @@ class VertexAIClient:
                 if i == len(urls_to_try) - 1:  # Last attempt
                     return {"error": "Request timeout - please try again"}
             except requests.exceptions.RequestException as e:
+                status_code = getattr(getattr(e, "response", None), "status_code", None)
+                body_text = getattr(getattr(e, "response", None), "text", "")
                 logging.error(f"Vertex AI API request failed for URL {i+1}: {e}")
-                if hasattr(e, 'response') and e.response is not None:
-                    logging.error(f"Response status: {e.response.status_code}")
-                    logging.error(f"Response body: {e.response.text}")
+                if status_code:
+                    logging.error(f"Response status: {status_code}")
+                    logging.error(f"Response body: {body_text}")
                 if i == len(urls_to_try) - 1:  # Last attempt
+                    if status_code in (401, 403):
+                        guidance = (
+                            "Authentication failed. Ensure Google ADC is configured: set GOOGLE_APPLICATION_CREDENTIALS "
+                            "to a service account JSON with Vertex AI permissions, or deploy with a GCP service account "
+                            "that has access to the endpoint."
+                        )
+                        return {"error": f"{e}. {guidance}"}
                     return {"error": f"API request failed: {str(e)}"}
         
         return {"error": "All endpoint URLs failed"}
 
 # Initialize Vertex AI client with correct endpoint configuration
 vertex_ai_client = None
-if VERTEX_AI_PROJECT and VERTEX_AI_ENDPOINT_ID and MEDSIGLIP_API_KEY:
+if VERTEX_AI_PROJECT and VERTEX_AI_ENDPOINT_ID:
     try:
         vertex_ai_client = VertexAIClient(
             VERTEX_AI_PROJECT, 
             VERTEX_AI_ENDPOINT_ID, 
             VERTEX_AI_REGION,
-            MEDSIGLIP_API_KEY
         )
-        logging.info("Vertex AI client initialized successfully with API key authentication")
+        logging.info("Vertex AI client initialized successfully with Google OAuth2 authentication")
     except Exception as e:
         logging.error(f"Failed to initialize Vertex AI client: {e}")
         vertex_ai_client = None
 else:
-    logging.warning("Vertex AI project, endpoint ID, or MedSigLip API key not set, cervical cancer staging disabled")
+    logging.warning("Vertex AI project or endpoint ID not set, cervical cancer staging disabled")
     if not VERTEX_AI_PROJECT:
         logging.error("VERTEX_AI_PROJECT environment variable is required")
-    if not MEDSIGLIP_API_KEY:
-        logging.error("MEDSIGLIP_API environment variable is required for authentication")
 
 app = Flask(__name__)
 genai.configure(api_key=gen_api)
