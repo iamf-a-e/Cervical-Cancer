@@ -383,7 +383,7 @@ def download_whatsapp_media(media_id, file_path):
         return False
 
 def stage_cervical_cancer(image_path):
-    """Stage cervical cancer using Vertex AI endpoint with MedSigLip model"""
+    """Stage cervical cancer using Vertex AI endpoint"""
     if not vertex_ai_client:
         return {
             "stage": "Error",
@@ -397,20 +397,26 @@ def stage_cervical_cancer(image_path):
         with open(image_path, "rb") as f:
             image_data = f.read()
 
+        # ✅ Use correct schema: input_bytes + single text string
         instance = {
-            "image": {"bytesBase64Encoded": base64.b64encode(image_data).decode("utf-8")},
-            "text": ["normal", "abnormal", "cervical cancer"]  # candidate labels
+            "image": {
+                "input_bytes": base64.b64encode(image_data).decode("utf-8")
+            }
         }
 
-        # Send prediction
-        prediction_result = vertex_ai_client.predict([instance])
+        payload = {
+            "instances": [instance],
+            "text": "A cervical screening image for analysis"
+        }
+
+        prediction_result = vertex_ai_client.predict(payload["instances"])
 
         if "predictions" not in prediction_result:
             return {
                 "stage": "Error",
                 "confidence": 0,
                 "success": False,
-                "error": f"Unexpected response format: {prediction_result}"
+                "error": f"Unexpected response: {prediction_result}"
             }
 
         prediction = prediction_result["predictions"][0]
@@ -419,18 +425,13 @@ def stage_cervical_cancer(image_path):
         if "displayNames" in prediction and "confidences" in prediction:
             labels = prediction["displayNames"]
             scores = prediction["confidences"]
-
             max_idx = scores.index(max(scores))
-            stage = labels[max_idx]
-            confidence = scores[max_idx]
-
             return {
-                "stage": stage,
-                "confidence": float(confidence),
+                "stage": labels[max_idx],
+                "confidence": float(scores[max_idx]),
                 "success": True
             }
 
-        # Fallback: handle unknown formats
         return {
             "stage": str(prediction),
             "confidence": 0,
