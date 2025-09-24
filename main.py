@@ -22,12 +22,11 @@ import google.auth
 from google.auth.transport.requests import Request
 import urllib.parse
 import threading
-import traceback
 
 logging.basicConfig(level=logging.INFO)
 
 # --------------------------------------------------------------------------------
-# ✅ Decode Base64 service account JSON and set GOOGLE_APPLICATION_CREDENTIALS
+# ✅ Decode Base64 service account JSON (Option A) and set GOOGLE_APPLICATION_CREDENTIALS
 # --------------------------------------------------------------------------------
 service_account_b64 = os.environ.get("GCP_SERVICE_ACCOUNT_BASE64")
 if service_account_b64:
@@ -145,10 +144,11 @@ name = "Fae"  # The bot will consider this person as its owner or creator
 bot_name = "Rudo"  # This will be the name of your bot, eg: "Hello I am Astro Bot"
 AGENT = "+263719835124"  # Fixed: added quotes to make it a string
 
-# Vertex AI Endpoint Configuration
+# Vertex AI Endpoint Configuration (kept from original)
 VERTEX_AI_ENDPOINT_ID = "9216603443274186752"
 VERTEX_AI_REGION = "us-west4"
 VERTEX_AI_PROJECT = os.environ.get("VERTEX_AI_PROJECT")
+# MEDSIGLIP_API_KEY is no longer used for Vertex AI authentication (ADC is used instead)
 MEDSIGLIP_API_KEY = os.environ.get("MEDSIGLIP_API")
 
 # --------------------------------------------------------------------------------
@@ -163,7 +163,7 @@ class VertexAIClient:
 
         # Build the correct endpoint base URL
         self.base_url = (
-            f"https://{location}-aiplatform.googleapis.com/v1/projects/"
+            f"https://{endpoint_id}.{location}-519460264942.prediction.vertexai.goog/v1/projects/"
             f"{project_id}/locations/{location}/endpoints/{endpoint_id}:predict"
         )
 
@@ -182,7 +182,6 @@ class VertexAIClient:
         headers["Content-Type"] = "application/json"
     
         try:
-            logging.info(f"🔬 Sending request to Vertex AI endpoint: {self.base_url}")
             response = requests.post(
                 self.base_url, json=payload, headers=headers, timeout=60
             )
@@ -192,13 +191,12 @@ class VertexAIClient:
             # Log full error response for debugging
             try:
                 error_text = response.text
-                logging.error(f"❌ Vertex AI HTTP error: {http_err} | Response: {error_text}")
             except Exception:
                 error_text = str(http_err)
-                logging.error(f"❌ Vertex AI HTTP error: {http_err}")
+            logging.error(f"Vertex AI HTTP error: {http_err} | Response: {error_text}")
             raise
         except Exception as e:
-            logging.error(f"❌ Vertex AI request failed: {e}")
+            logging.error(f"Vertex AI request failed: {e}")
             raise
 
 vertex_ai_client = None
@@ -258,27 +256,12 @@ class CustomURLExtract(URLExtract):
 
 extractor = CustomURLExtract(limit=1)
 
-# Initialize TLD cache with better error handling
-def initialize_tld_cache():
-    try:
-        # Check if cache file exists and is recent
-        cache_file = extractor._get_cache_file_path()
-        if os.path.exists(cache_file):
-            file_age = time.time() - os.path.getmtime(cache_file)
-            # Update if file is older than 30 days
-            if file_age > 30 * 24 * 60 * 60:
-                extractor.update()
-                logging.info("✅ TLD cache updated successfully")
-            else:
-                logging.info("✅ Using existing TLD cache")
-        else:
-            extractor.update()
-            logging.info("✅ TLD cache downloaded successfully")
-    except Exception as e:
-        logging.warning(f"⚠️ Could not update TLD cache: {e}. Using built-in fallback.")
-        # Continue with built-in TLDs
-
-initialize_tld_cache()
+# Initialize TLD cache
+try:
+    extractor.update()
+    logging.info("✅ TLD cache updated successfully")
+except Exception as e:
+    logging.warning(f"⚠️ Could not update TLD cache: {e}. Using built-in fallback.")
 
 generation_config = {
     "temperature": 1,
@@ -433,56 +416,40 @@ def detect_language(message):
     return "english"  # Default to English
 
 def send(answer, sender, phone_id):
-    """Send message via WhatsApp API with better error handling"""
+    """Send message via WhatsApp API"""
     url = f"https://graph.facebook.com/v19.0/{phone_id}/messages"
     headers = {
         'Authorization': f'Bearer {wa_token}',
         'Content-Type': 'application/json'
     }
     
-    # Clean the answer text and ensure it's not empty
-    if not answer or answer.strip() == "":
-        answer = "I'm sorry, I couldn't generate a response. Please try again."
-    
-    # Ensure sender phone number is in correct format (remove spaces, etc.)
-    sender_clean = sender.strip()
-    
     data = {
         "messaging_product": "whatsapp",
-        "to": sender_clean,
+        "to": sender,
         "type": "text",
         "text": {
-            "body": answer[:4096]  # WhatsApp has a character limit
+            "body": answer
         }
     }
 
     try:
-        response = requests.post(url, headers=headers, json=data, timeout=30)
+        response = requests.post(url, headers=headers, json=data)
         response.raise_for_status()
-        logging.debug(f"📤 Message sent to {sender_clean}")
-        return response
-    except requests.exceptions.HTTPError as e:
-        logging.error(f"❌ WhatsApp API HTTP error for {sender_clean}: {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            try:
-                error_details = e.response.json()
-                logging.error(f"❌ WhatsApp API error details: {error_details}")
-            except:
-                logging.error(f"❌ WhatsApp API raw response: {e.response.text}")
-        return None
+        logging.debug(f"📤 Message sent to {sender}")
     except Exception as e:
-        logging.error(f"❌ Error sending message to {sender_clean}: {e}")
-        return None
+        logging.error(f"❌ Error sending message to {sender}: {e}")
+        response = None
+
+    # Save bot response to conversation history
+    save_user_conversation(sender, "bot", answer)
+
+    return response
 
 def remove(*file_paths):
     """Remove files if they exist"""
     for file in file_paths:
         if os.path.exists(file):
-            try:
-                os.remove(file)
-                logging.debug(f"🗑️ Removed file: {file}")
-            except Exception as e:
-                logging.warning(f"⚠️ Could not remove file {file}: {e}")
+            os.remove(file)
 
 def download_image(url, file_path):
     """Download image from URL"""
@@ -538,9 +505,8 @@ def download_whatsapp_media(media_id, file_path):
         return False
 
 def stage_cervical_cancer(image_path):
-    """Stage cervical cancer using Vertex AI endpoint with correct payload format"""
+    """Stage cervical cancer using Vertex AI endpoint"""
     if not vertex_ai_client:
-        logging.error("❌ Vertex AI client not configured")
         return {
             "stage": "Error",
             "confidence": 0,
@@ -549,96 +515,52 @@ def stage_cervical_cancer(image_path):
         }
 
     try:
-        # Read and encode the image
         with open(image_path, "rb") as f:
             image_data = f.read()
-        
-        image_b64 = base64.b64encode(image_data).decode("utf-8")
 
-        # Correct payload format for MedSigLip model
         payload = {
             "instances": [
                 {
-                    "image_bytes": {"b64": image_b64},
-                    "key": "test_key"
+                    "image": {
+                        "input_bytes": base64.b64encode(image_data).decode("utf-8")
+                    }
                 }
             ]
         }
 
-        logging.info(f"🔬 Sending request to Vertex AI endpoint...")
-        
+        logging.info(f"🔬 Vertex request payload: {json.dumps(payload)[:500]}...")
+
         prediction_result = vertex_ai_client.predict(payload)
-        logging.info(f"🔬 Vertex AI response received: {json.dumps(prediction_result, indent=2)[:1000]}...")
 
         if "predictions" not in prediction_result:
-            logging.error(f"❌ Unexpected Vertex response structure: {prediction_result}")
+            logging.error(f"❌ Unexpected Vertex response: {prediction_result}")
             return {
                 "stage": "Error",
                 "confidence": 0,
                 "success": False,
-                "error": f"Unexpected response structure: {prediction_result}"
+                "error": f"Unexpected response: {prediction_result}"
             }
 
-        predictions = prediction_result["predictions"]
-        if not predictions:
-            logging.error(f"❌ No predictions in response: {prediction_result}")
+        prediction = prediction_result["predictions"][0]
+
+        if "displayNames" in prediction and "confidences" in prediction:
+            labels = prediction["displayNames"]
+            scores = prediction["confidences"]
+            max_idx = scores.index(max(scores))
             return {
-                "stage": "Error", 
-                "confidence": 0,
-                "success": False,
-                "error": "No predictions returned"
+                "stage": labels[max_idx],
+                "confidence": float(scores[max_idx]),
+                "success": True
             }
 
-        prediction = predictions[0]
-        
-        # Handle different response formats
-        if isinstance(prediction, dict):
-            if "displayNames" in prediction and "confidences" in prediction:
-                labels = prediction["displayNames"]
-                scores = prediction["confidences"]
-                if labels and scores:
-                    max_idx = scores.index(max(scores))
-                    return {
-                        "stage": labels[max_idx],
-                        "confidence": float(scores[max_idx]),
-                        "success": True
-                    }
-            elif "classes" in prediction and "scores" in prediction:
-                labels = prediction["classes"]
-                scores = prediction["scores"]
-                if labels and scores:
-                    max_idx = scores.index(max(scores))
-                    return {
-                        "stage": labels[max_idx],
-                        "confidence": float(scores[max_idx]),
-                        "success": True
-                    }
-            elif "prediction" in prediction:
-                # Handle nested prediction format
-                nested_pred = prediction["prediction"]
-                if isinstance(nested_pred, dict) and "displayNames" in nested_pred:
-                    labels = nested_pred["displayNames"]
-                    scores = nested_pred["confidences"]
-                    if labels and scores:
-                        max_idx = scores.index(max(scores))
-                        return {
-                            "stage": labels[max_idx],
-                            "confidence": float(scores[max_idx]),
-                            "success": True
-                        }
-        
-        # Fallback: return the raw prediction
-        logging.warning(f"⚠️ Using fallback prediction format: {prediction}")
         return {
             "stage": str(prediction),
-            "confidence": 0.5,  # Default confidence
-            "success": True,
-            "raw_prediction": prediction
+            "confidence": 0,
+            "success": True
         }
 
     except Exception as e:
         logging.error(f"❌ Error in cervical cancer staging: {e}")
-        logging.error(f"❌ Stack trace: {traceback.format_exc()}")
         return {
             "stage": "Error",
             "confidence": 0,
@@ -833,63 +755,31 @@ def handle_cervical_image(sender, media_id, phone_id):
             worker_id = state.get("worker_id", "Unknown")
             patient_id = state.get("patient_id", "Unknown")
             
-            # Format the response based on language
             if lang == "shona":
-                response = f"""Mhedzisiro yekuongorora neMedSigLip:
-
-📋 Worker ID: {worker_id}
-👤 Patient ID: {patient_id}
-🔬 Danho: {stage}
-✅ Chivimbo: {confidence:.1%}
-
-💡 Ziva kuti: Izvi hazvitsivi kuongororwa kwechiremba. Unofanira kuona chiremba kuti uwane kuongororwa kwakazara."""
+                response = f"Mhedzisiro yekuongorora neMedSigLip:\n- Worker ID: {worker_id}\n- Patient ID: {patient_id}\n- Danho: {stage}\n- Chivimbo: {confidence:.2%}\n\nNote: Izvi hazvitsivi kuongororwa kwechiremba. Unofanira kuona chiremba kuti uwane kuongororwa kwakazara."
             else:
-                response = f"""MedSigLip Diagnosis Results:
-
-📋 Worker ID: {worker_id}
-👤 Patient ID: {patient_id}  
-🔬 Stage: {stage}
-✅ Confidence: {confidence:.1%}
-
-💡 Important: This does not replace a doctor's diagnosis. Please see a healthcare professional for a complete evaluation."""
+                response = f"MedSigLip Diagnosis results:\n- Worker ID: {worker_id}\n- Patient ID: {patient_id}\n- Stage: {stage}\n- Confidence: {confidence:.2%}\n\nNote: This does not replace a doctor's diagnosis. Please see a healthcare professional for a complete evaluation."
         else:
             error_msg = result.get("error", "Unknown error")
-            logging.error(f"❌ Staging failed for {sender}: {error_msg}")
-            
             if lang == "shona":
-                response = f"""❌ Ndine urombo, handina kukwanisa kuongorora mufananidzo wenyu.
-
-Tsaona: {error_msg}
-
-💡 Edza kuendesa imwe mufananidzo kana kumbobvunza chiremba zvakananga."""
+                response = f"Ndine urombo, handina kukwanisa kuongorora mufananidzo wenyu. Error: {error_msg}. Edza kuendesa imwe mufananidzo kana kumbobvunza chiremba."
             else:
-                response = f"""❌ I'm sorry, I couldn't analyze your image.
-
-Error: {error_msg}
-
-💡 Please try sending another image or consult a doctor directly."""
+                response = f"I'm sorry, I couldn't analyze your image. Error: {error_msg}. Please try sending another image or consult a doctor directly."
         
         # Clean up the downloaded image
-        try:
-            remove(image_path)
-        except Exception as e:
-            logging.warning(f"⚠️ Could not remove image file: {e}")
+        remove(image_path)
         
-        # Send the response
         send(response, sender, phone_id)
     else:
-        error_msg = "Failed to download image from WhatsApp"
-        logging.error(f"❌ {error_msg} for {sender}")
-        
         if lang == "shona":
-            send("❌ Ndine urombo, handina kukwanisa kugamuchira mufananidzo wenyu. Edza zvakare.", sender, phone_id)
+            send("Ndine urombo, handina kukwanisa kugamuchira mufananidzo wenyu. Edza zvakare.", sender, phone_id)
         else:
-            send("❌ I'm sorry, I couldn't download your image. Please try again.", sender, phone_id)
+            send("I'm sorry, I couldn't download your image. Please try again.", sender, phone_id)
     
     # Ask if they want to submit another image or end the session
     state["step"] = "follow_up"
     if lang == "shona":
-        send("Unoda kuendesa imwe mufananidzo here? (Reply 'Ehe' kana 'Aihwa')", sender, phone_id)
+        send("Unoda kuendesa imwe mufananidzo here? (Reply 'Ehe' for yes or 'Aihwa' for no)", sender, phone_id)
     else:
         send("Would you like to submit another image? (Reply 'Yes' or 'No')", sender, phone_id)
     
@@ -1149,49 +1039,23 @@ def test_redis():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/debug-vertex', methods=['POST'])
-def debug_vertex():
-    """Debug endpoint to test Vertex AI with a sample image"""
-    if not vertex_ai_client:
-        return jsonify({"error": "Vertex AI client not configured"}), 500
-    
-    try:
-        # Test with a sample payload
-        test_payload = {
-            "instances": [
-                {
-                    "image_bytes": {"b64": "test"},
-                    "key": "test_key"
-                }
-            ]
-        }
-        
-        result = vertex_ai_client.predict(test_payload)
-        return jsonify({
-            "status": "success", 
-            "result": result,
-            "endpoint_url": vertex_ai_client.base_url
-        })
-    except Exception as e:
-        return jsonify({"error": str(e), "endpoint_url": vertex_ai_client.base_url}), 500
-
-@app.route('/debug-image/<sender>', methods=['GET'])
-def debug_image(sender):
-    """Debug endpoint to check image processing for a user"""
-    state = user_states.get(sender, {})
-    return jsonify({
-        "user_state": state,
-        "redis_connected": redis_client is not None,
-        "vertex_ai_configured": vertex_ai_client is not None
-    })
-
 # Load user states on startup
 load_user_states()
 
+# Pre-warm the TLD cache in background
+def warmup_tld_cache():
+    try:
+        extractor.update()
+        logging.info("✅ TLD cache warmed up successfully")
+    except Exception as e:
+        logging.warning(f"⚠️ TLD cache warmup failed: {e}")
+
+# Start warmup in background thread
+tld_thread = threading.Thread(target=warmup_tld_cache, daemon=True)
+tld_thread.start()
+
 logging.info("🚀 Application started successfully!")
-logging.info(f"📊 Initial stats - User states: {len(user_states)}, Redis: {redis_client is not None}, Vertex AI: {vertex_ai_client is not None}")
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    logging.info(f"🌐 Starting server on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
