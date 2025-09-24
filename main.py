@@ -57,31 +57,27 @@ name = "Fae"  # The bot will consider this person as its owner or creator
 bot_name = "Rudo"  # This will be the name of your bot, eg: "Hello I am Astro Bot"
 AGENT = "+263719835124"  # Fixed: added quotes to make it a string
 
-# Vertex AI Endpoint Configuration (UPDATED with dedicated endpoint)
+# Vertex AI Endpoint Configuration (UPDATED with correct dedicated endpoint format)
 VERTEX_AI_ENDPOINT_ID = "9216603443274186752"
 VERTEX_AI_REGION = "us-west4"
 VERTEX_AI_PROJECT = os.environ.get("VERTEX_AI_PROJECT")
 # Get MedSigLip API Key from environment
 MEDSIGLIP_API_KEY = os.environ.get("MEDSIGLIP_API")
-# Dedicated endpoint domain from the image
-VERTEX_AI_DEDICATED_ENDPOINT = "9216603443274186752.us-west4-519460264942.prediction.vertexai.goog"
 
 class VertexAIClient:
-    def __init__(self, project_id, endpoint_id, region="us-west4", dedicated_endpoint=None, api_key=None):
+    def __init__(self, project_id, endpoint_id, region="us-west4", api_key=None):
         self.project_id = project_id
         self.endpoint_id = endpoint_id
         self.region = region
-        self.dedicated_endpoint = dedicated_endpoint
         self.api_key = api_key
         
-        # Use dedicated endpoint if provided, otherwise fall back to standard REST API
-        if dedicated_endpoint:
-            self.base_url = f"https://{dedicated_endpoint}"
-            logging.info(f"Using dedicated endpoint: {self.base_url}")
-        else:
-            self.base_url = f"https://{region}-aiplatform.googleapis.com/v1"
-            logging.info(f"Using standard REST API endpoint: {self.base_url}")
-            
+        # For dedicated endpoints, the URL follows this format:
+        # https://{REGION}-{PROJECT_NUMBER}.prediction.vertexai.goog/v1/projects/{PROJECT_ID}/locations/{REGION}/endpoints/{ENDPOINT_ID}:predict
+        self.base_url = f"https://{region}-aiplatform.googleapis.com/v1"
+        self.dedicated_endpoint_url = f"https://{region}-{project_id}.prediction.vertexai.goog/v1/projects/{project_id}/locations/{region}/endpoints/{endpoint_id}:predict"
+        
+        logging.info(f"Using dedicated endpoint URL: {self.dedicated_endpoint_url}")
+        
         # Validate API key
         if not self.api_key:
             logging.warning("No MedSigLip API key provided - authentication may fail")
@@ -96,45 +92,48 @@ class VertexAIClient:
     
     def predict(self, instances):
         """Make prediction using Vertex AI dedicated endpoint with API key authentication"""
-        # For dedicated endpoints, the URL structure is different
-        if self.dedicated_endpoint:
-            url = f"https://{self.dedicated_endpoint}/v1/models/default:predict"
-        else:
-            # Fallback to standard REST API
-            url = f"{self.base_url}/projects/{self.project_id}/locations/{self.region}/endpoints/{self.endpoint_id}:predict"
+        # Try dedicated endpoint first, then fallback to standard REST API
+        urls_to_try = [
+            self.dedicated_endpoint_url,
+            f"{self.base_url}/projects/{self.project_id}/locations/{self.region}/endpoints/{self.endpoint_id}:predict"
+        ]
         
-        headers = {
-            "Content-Type": "application/json"
-        }
+        for i, url in enumerate(urls_to_try):
+            headers = {
+                "Content-Type": "application/json"
+            }
+            
+            # Add API key authentication
+            auth_headers = self.get_auth_header()
+            headers.update(auth_headers)
+            
+            # Prepare the request payload for MedSigLip model
+            payload = {
+                "instances": instances
+            }
+            
+            try:
+                logging.info(f"Attempt {i+1}: Sending prediction request to Vertex AI endpoint: {url}")
+                response = requests.post(url, headers=headers, json=payload, timeout=30)
+                response.raise_for_status()
+                result = response.json()
+                logging.info(f"Vertex AI prediction successful using URL {i+1}")
+                return result
+            except requests.exceptions.Timeout:
+                logging.error(f"Vertex AI request timed out for URL {i+1}")
+                if i == len(urls_to_try) - 1:  # Last attempt
+                    return {"error": "Request timeout - please try again"}
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Vertex AI API request failed for URL {i+1}: {e}")
+                if hasattr(e, 'response') and e.response is not None:
+                    logging.error(f"Response status: {e.response.status_code}")
+                    logging.error(f"Response body: {e.response.text}")
+                if i == len(urls_to_try) - 1:  # Last attempt
+                    return {"error": f"API request failed: {str(e)}"}
         
-        # Add API key authentication
-        auth_headers = self.get_auth_header()
-        headers.update(auth_headers)
-        
-        # Prepare the request payload for MedSigLip model
-        # Assuming the model expects image data in base64 format
-        payload = {
-            "instances": instances
-        }
-        
-        try:
-            logging.info(f"Sending prediction request to Vertex AI endpoint: {url}")
-            response = requests.post(url, headers=headers, json=payload, timeout=30)
-            response.raise_for_status()
-            result = response.json()
-            logging.info(f"Vertex AI prediction successful: {result}")
-            return result
-        except requests.exceptions.Timeout:
-            logging.error("Vertex AI request timed out")
-            return {"error": "Request timeout - please try again"}
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Vertex AI API request failed: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                logging.error(f"Response status: {e.response.status_code}")
-                logging.error(f"Response body: {e.response.text}")
-            return {"error": str(e)}
+        return {"error": "All endpoint URLs failed"}
 
-# Initialize Vertex AI client with dedicated endpoint and API key authentication
+# Initialize Vertex AI client with correct endpoint configuration
 vertex_ai_client = None
 if VERTEX_AI_PROJECT and VERTEX_AI_ENDPOINT_ID and MEDSIGLIP_API_KEY:
     try:
@@ -142,7 +141,6 @@ if VERTEX_AI_PROJECT and VERTEX_AI_ENDPOINT_ID and MEDSIGLIP_API_KEY:
             VERTEX_AI_PROJECT, 
             VERTEX_AI_ENDPOINT_ID, 
             VERTEX_AI_REGION,
-            VERTEX_AI_DEDICATED_ENDPOINT,
             MEDSIGLIP_API_KEY
         )
         logging.info("Vertex AI client initialized successfully with API key authentication")
@@ -151,6 +149,8 @@ if VERTEX_AI_PROJECT and VERTEX_AI_ENDPOINT_ID and MEDSIGLIP_API_KEY:
         vertex_ai_client = None
 else:
     logging.warning("Vertex AI project, endpoint ID, or MedSigLip API key not set, cervical cancer staging disabled")
+    if not VERTEX_AI_PROJECT:
+        logging.error("VERTEX_AI_PROJECT environment variable is required")
     if not MEDSIGLIP_API_KEY:
         logging.error("MEDSIGLIP_API environment variable is required for authentication")
 
@@ -822,148 +822,82 @@ def message_handler(data, phone_id):
     elif data["type"] == "image":
         media_type = "image"
         media_url = data["image"]["id"]
-        # For WhatsApp, we need to download the image using the Media API
-        prompt = "[Image received]"
-        logging.info(f"Image received: {media_url}")
+        logging.info(f"Image received, media_id: {media_url}")
+        # Use a placeholder prompt for image processing
+        prompt = "IMAGE_UPLOADED"
+    else:
+        prompt = "UNSUPPORTED_MESSAGE_TYPE"
+        logging.warning(f"Unsupported message type: {data['type']}")
     
-    # Save to conversation history
-    save_user_conversation(sender, "user", prompt if prompt else "[Media message]")
+    # Save user message to conversation history
+    save_user_conversation(sender, "user", prompt)
     
-    # Handle based on current state
+    # Handle the conversation based on current state
     handle_conversation_state(sender, prompt, phone_id, media_url, media_type)
     
-    # Daily report and cleanup
-    if db:
-        scheduler.enterabs(report_time.timestamp(), 1, create_report, (phone_id,))
-        scheduler.run(blocking=False)
-        delete_old_chats()
+    # Save updated state to Redis
+    save_user_state(sender, user_states[sender])
 
-@app.route("/", methods=["GET", "POST"])
-def index():
-    return render_template("connected.html")
+@app.route('/', methods=['GET'])
+def home():
+    return render_template('index.html')
 
-@app.route("/webhook", methods=["GET", "POST"])
+@app.route('/webhook', methods=['GET'])
 def webhook():
-    if request.method == "GET":
-        mode = request.args.get("hub.mode")
-        token = request.args.get("hub.verify_token")
-        challenge = request.args.get("hub.challenge")
-        if mode == "subscribe" and token == "BOT":
-            return challenge, 200
-        else:
-            return "Failed", 403
-    elif request.method == "POST":
-        try:
-            data = request.get_json()
-            logging.info(f"Webhook received: {json.dumps(data, indent=2)}")
-            
-            entry = data["entry"][0]
-            changes = entry["changes"][0]
-            value = changes["value"]
-            
-            # Check if messages exist in the webhook data
-            if "messages" in value:
-                message_data = value["messages"][0]
-                phone_id = value["metadata"]["phone_number_id"]
-                message_handler(message_data, phone_id)
-        except Exception as e:
-            logging.error(f"Error in webhook: {e}")
-        return jsonify({"status": "ok"}), 200
-
-@app.route("/download_media/<media_id>", methods=["GET"])
-def download_media(media_id):
-    """Endpoint to download media from WhatsApp"""
     try:
-        url = f"https://graph.facebook.com/v19.0/{media_id}"
-        headers = {
-            'Authorization': f'Bearer {wa_token}'
-        }
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        media_data = response.json()
-        
-        # Download the actual media content
-        media_url = media_data.get("url")
-        if media_url:
-            media_response = requests.get(media_url, headers=headers)
-            media_response.raise_for_status()
-            
-            # Save the media to a temporary file
-            media_path = f"/tmp/{media_id}.jpg"
-            with open(media_path, 'wb') as f:
-                f.write(media_response.content)
-            
-            return jsonify({"success": True, "path": media_path})
+        if request.args.get('hub.verify_token') == 'my_verify_token':
+            return request.args.get('hub.challenge')
         else:
-            return jsonify({"success": False, "error": "No URL found in media data"})
+            return 'Error, wrong validation token'
     except Exception as e:
-        logging.error(f"Error downloading media: {e}")
-        return jsonify({"success": False, "error": str(e)})
+        logging.error(f"Webhook verification error: {e}")
+        return 'Error'
 
-@app.route("/test-vertex", methods=["GET"])
-def test_vertex():
-    """Test Vertex AI endpoint connectivity with API key authentication"""
-    if not vertex_ai_client:
-        return jsonify({"status": "error", "message": "Vertex AI client not configured"})
-    
+@app.route('/webhook', methods=['POST'])
+def webhook_handle():
     try:
-        # Test with a simple prediction request
-        test_instance = {
-            "image_bytes": {"b64": base64.b64encode(b"test image data").decode('utf-8')}
-        }
+        data = request.get_json()
+        logging.info(f"Received webhook data: {json.dumps(data, indent=2)}")
         
-        result = vertex_ai_client.predict([test_instance])
-        
-        return jsonify({
-            "status": "success",
-            "endpoint_used": vertex_ai_client.base_url,
-            "authentication_method": "API Key",
-            "response": result
-        })
+        if data.get("object") == "whatsapp_business_account":
+            for entry in data.get("entry", []):
+                for change in entry.get("changes", []):
+                    if change.get("field") == "messages":
+                        value = change.get("value", {})
+                        if "messages" in value:
+                            for message in value["messages"]:
+                                message_handler(message, phone_id)
+        return jsonify({"status": "success"}), 200
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)})
+        logging.error(f"Webhook handling error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route("/test-redis", methods=["GET"])
-def test_redis():
-    """Test Redis connectivity"""
-    if redis_client:
-        try:
-            # Test basic operations
-            test_key = f"test_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            redis_client.set(test_key, "test_value", ex=10)
-            value = redis_client.get(test_key)
-            
-            # Test state operations
-            test_state = {"step": "test", "language": "english"}
-            redis_client.setex("test_state:123", timedelta(minutes=1), json.dumps(test_state))
-            saved_state = redis_client.get("test_state:123")
-            
-            return jsonify({
-                "status": "success", 
-                "redis_working": value == "test_value",
-                "state_operations": saved_state is not None,
-                "user_states_count": len(user_states)
-            })
-        except Exception as e:
-            return jsonify({"status": "error", "message": str(e)})
-    else:
-        return jsonify({"status": "error", "message": "Redis client not initialized"})
-
-@app.route("/user-states", methods=["GET"])
-def get_user_states():
-    """Get current user states for debugging"""
-    return jsonify({
-        "user_states": user_states,
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    status = {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
         "redis_connected": redis_client is not None,
         "vertex_ai_configured": vertex_ai_client is not None,
-        "vertex_endpoint": VERTEX_AI_DEDICATED_ENDPOINT if vertex_ai_client else None,
-        "authentication_method": "API Key"
-    })
+        "gemini_configured": gen_api is not None,
+        "whatsapp_configured": wa_token is not None and phone_id is not None
+    }
+    
+    # Test Redis connection
+    if redis_client:
+        try:
+            redis_client.ping()
+            status["redis_status"] = "connected"
+        except Exception as e:
+            status["redis_status"] = f"error: {str(e)}"
+            status["status"] = "degraded"
+    
+    return jsonify(status)
 
-if __name__ == "__main__":
-    # Load states at startup
-    load_user_states()
-    logging.info(f"Application started with {len(user_states)} loaded user states")
-    logging.info(f"Vertex AI endpoint: {VERTEX_AI_DEDICATED_ENDPOINT}")
-    logging.info(f"Authentication method: API Key")
-    app.run(debug=True, port=8000)
+# Load user states on startup
+load_user_states()
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
