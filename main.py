@@ -944,13 +944,32 @@ def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_ty
         logging.error(f"❌ No state found for {sender}")
         return
     
+    prompt_lower = prompt.strip().lower()
+
+    # 🔄 Global reset trigger
+    reset_keywords = ["hey", "hi", "hello", "mhoro", "mhoroi", "sawubona", "unjani"]
+    if prompt_lower in reset_keywords:
+        user_states[sender] = {
+            "step": "language_detection",
+            "language": "english",
+            "needs_language_confirmation": False,
+            "registered": False,
+            "worker_id": None,
+            "patient_id": None,
+            "conversation_history": []
+        }
+        save_user_state(sender, user_states[sender])
+        send("👋 Hello! Let's start again. What language would you like to use?", sender, phone_id)
+        return
+
     logging.info(f"💬 Processing message from {sender}, current step: {state['step']}")
-    
-    # Check if we have an image for cervical cancer staging
+
+    # 📷 If user sends an image during diagnosis
     if media_type == "image" and state["step"] == "awaiting_image":
         handle_cervical_image(sender, media_url, phone_id)
         return
     
+    # 🌍 Route by state
     if state["step"] == "language_detection":
         handle_language_detection(sender, prompt, phone_id)
     elif state["step"] == "worker_id":
@@ -960,18 +979,20 @@ def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_ty
     elif state["step"] == "follow_up":
         handle_follow_up(sender, prompt, phone_id)
     elif state["step"] == "main_menu":
-        # For main menu, use Gemini for general queries
+        # General queries via Gemini
         lang = state.get("language", "english")
         fresh_convo = model.start_chat(history=[])
         try:
             fresh_convo.send_message(instructions.instructions)
             fresh_convo.send_message(prompt)
             reply = fresh_convo.last.text
-            
-            # Filter out any internal instructions
-            filtered_reply = re.sub(r'(Alright, you are now connected to the backend\.|Here are the links to the product images for Dawa Health:.*?https?://\S+)', '', reply, flags=re.DOTALL)
-            filtered_reply = filtered_reply.strip()
-            
+
+            # 🧹 Filter out any internal instructions
+            filtered_reply = re.sub(
+                r'(Alright, you are now connected to the backend\.|Here are the links to the product images for Dawa Health:.*?https?://\S+)',
+                '', reply, flags=re.DOTALL
+            ).strip()
+
             if filtered_reply:
                 send(filtered_reply, sender, phone_id)
             else:
@@ -979,7 +1000,7 @@ def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_ty
                     send("Ndine urombo, handina kunzwisisa. Ungataura zvakare here?", sender, phone_id)
                 else:
                     send("I'm sorry, I didn't understand that. Could you please rephrase your question?", sender, phone_id)
-                    
+
         except ResourceExhausted as e:
             logging.error(f"❌ Gemini API quota exceeded: {e}")
             if lang == "shona":
@@ -987,11 +1008,12 @@ def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_ty
             else:
                 send("Sorry, we're experiencing high traffic. Please try again later.", sender, phone_id)
     else:
-        # Default to language detection if state is unknown
+        # Default: restart at language detection
         state["step"] = "language_detection"
         handle_language_detection(sender, prompt, phone_id)
-    
+
     save_user_state(sender, state)
+
 
 def message_handler(data, phone_id):
     global user_states
