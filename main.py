@@ -771,33 +771,34 @@ def handle_cervical_image(sender, media_id, phone_id):
     """Handle cervical cancer image analysis with improved feedback"""
     state = user_states[sender]
     lang = state["language"]
-    
-    # Download image
+
+    # File path for the incoming image
     image_path = f"/tmp/{sender}_{int(time.time())}.jpg"
-    
-    # Send initial message
+
+    # Localized "analyzing" message
     waiting_messages = {
         "shona": "📨 Ndiri kuongorora mufananidzo wenyu...",
         "ndebele": "📨 Ngiyahlola isithombe sakho...", 
         "english": "📨 Analyzing your image..."
     }
-    send(waiting_messages.get(lang, "📨 Analyzing your image..."), sender, phone_id)
-    
+
+    # Try to download media
     if download_whatsapp_media(media_id, image_path):
+        # ✅ Only send analyzing message once we have the file
+        send(waiting_messages.get(lang, "📨 Analyzing your image..."), sender, phone_id)
+
         result = stage_cervical_cancer(image_path)
-        
-        # Format response based on result type
+
         worker_id = state.get("worker_id", "Unknown")
         patient_id = state.get("patient_id", "Unknown")
-        
+
         if result["success"]:
             stage = result["stage"]
             confidence = result["confidence"]
             response_type = result.get("response_type", "unknown")
-            
-            # Different responses based on analysis type
+
+            # Classification results
             if response_type == "classification":
-                # Proper classification result
                 if lang == "shona":
                     response = f"""🔬 MedSigLip Ongororo:
 
@@ -811,7 +812,7 @@ def handle_cervical_image(sender, media_id, phone_id):
                     response = f"""🔬 Imiphumela yeMedSigLip:
 
 📋 I-Worker ID: {worker_id}
-👤 I-Patient ID: {patient_id}  
+👤 I-Patient ID: {patient_id}
 🏥 Isigaba: {stage}
 ✅ Ukuthemba: {confidence:.1%}
 
@@ -826,8 +827,8 @@ def handle_cervical_image(sender, media_id, phone_id):
 
 💡 Note: This does not replace a doctor's diagnosis."""
             
+            # Embedding-based fallback
             elif response_type == "embedding_fallback":
-                # Embedding-based analysis
                 note = result.get("note", "")
                 if lang == "shona":
                     response = f"""🔬 Ongororo Yakaitwa:
@@ -847,9 +848,8 @@ def handle_cervical_image(sender, media_id, phone_id):
 ✅ Confidence: {confidence:.1%}
 
 💡 {note}"""
-            
             else:
-                # Unknown/raw format
+                # Unknown format
                 if lang == "shona":
                     response = f"""🔬 Mufananidzo Wagamuchirwa:
 
@@ -866,9 +866,8 @@ def handle_cervical_image(sender, media_id, phone_id):
 🏥 Status: Image processed successfully
 
 💡 Doctor will provide detailed interpretation."""
-        
         else:
-            # Error case
+            # ❌ Analysis error
             error_msg = result.get("error", "Unknown error")
             if lang == "shona":
                 response = f"""❌ Hatina kukwanisa kuongorora mufananidzo:
@@ -882,32 +881,33 @@ Tsaona: {error_msg}
 Error: {error_msg}
 
 💡 Please try another image or consult a doctor."""
-        
-        # Cleanup and send response
+
+        # Cleanup temp image
         try:
             os.remove(image_path)
         except:
             pass
-        
+
         send(response, sender, phone_id)
-        
+
     else:
-        # Download failed
-        error_msg = "Failed to download image from WhatsApp"
+        # ❌ Download failed
         if lang == "shona":
             send("❌ Hatina kukwanisa kugamuchira mufananidzo. Edza zvakare.", sender, phone_id)
+        elif lang == "ndebele":
+            send("❌ Asikwazanga ukulanda isithombe. Zama futhi.", sender, phone_id)
         else:
             send("❌ Could not download image. Please try again.", sender, phone_id)
-    
-    # Follow-up question
+
+    # 🔄 Always advance to follow_up, success or failure
     state["step"] = "follow_up"
     questions = {
         "shona": "Unoda kuendesa imwe mufananidzo here? (Ehe/Aihwa)",
         "ndebele": "Uyafuna ukuthumela esinye isithombe? (Yebo/Cha)", 
         "english": "Would you like to submit another image? (Yes/No)"
     }
-    
     send(questions.get(lang, questions["english"]), sender, phone_id)
+
     save_user_state(sender, state)
 
 
