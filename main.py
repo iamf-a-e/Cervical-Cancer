@@ -919,12 +919,13 @@ def handle_follow_up(sender, prompt, phone_id):
     prompt_lower = prompt.lower()
     
     if any(word in prompt_lower for word in ["yes", "ehe", "yebo", "hongu", "ndinoda"]):
-        # Reset to patient ID step for new diagnosis
-        state["step"] = "patient_id"
+        # Go directly to image upload for the same patient
+        state["step"] = "awaiting_image"
         if lang == "shona":
-            send("Patient ID yemurwere itsva ndeyipi?", sender, phone_id)
+            send("Tumirai imwe mufananidzo wekuongororwa.", sender, phone_id)
         else:
-            send("What is the Patient ID for the new patient?", sender, phone_id)
+            send("Please upload another image for analysis.", sender, phone_id)
+    
     else:
         # End session
         state["step"] = "main_menu"
@@ -934,6 +935,7 @@ def handle_follow_up(sender, prompt, phone_id):
             send("Thank you for using Dawa Health with MedSigLip technology. If you have more questions, feel free to ask.", sender, phone_id)
     
     save_user_state(sender, state)
+
 
 def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_type=None):
     """Handle conversation based on current state"""
