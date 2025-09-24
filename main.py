@@ -17,63 +17,28 @@ import redis
 import json
 import re
 import base64
+
+# NEW imports for Google Application Default Credentials (ADC)
 import google.auth
-from google.oauth2 import service_account
-from google.auth.transport.requests import Request as GoogleAuthRequest
+from google.auth.transport.requests import Request
 
 logging.basicConfig(level=logging.INFO)
 
-# --------------------------
-# Google SA env var loader
-# --------------------------
-def _get_env_var(*names):
-    """Return the first present env var value among provided names.
-    Tries given names as-is, UPPERCASE, and lowercase variants.
-    """
-    for name in names:
-        val = (
-            os.environ.get(name)
-            or os.environ.get(name.upper())
-            or os.environ.get(name.lower())
-        )
-        if val is not None:
-            return val
-    return None
-
-def load_service_account_info_from_env():
-    """Load Google service account JSON fields from individual environment variables.
-    Expects keys matching service account JSON: project_id, private_key_id, private_key,
-    client_email, client_id, auth_uri, token_uri, auth_provider_x509_cert_url,
-    client_x509_cert_url, universe_domain.
-    Returns a dict suitable for service_account.Credentials.from_service_account_info
-    or None if required fields are missing.
-    """
-    fields = {
-        "project_id": _get_env_var("project_id"),
-        "private_key_id": _get_env_var("private_key_id"),
-        "private_key": _get_env_var("private_key"),
-        "client_email": _get_env_var("client_email"),
-        "client_id": _get_env_var("client_id"),
-        "auth_uri": _get_env_var("auth_uri"),
-        "token_uri": _get_env_var("token_uri"),
-        "auth_provider_x509_cert_url": _get_env_var("auth_provider_x509_cert_url"),
-        "client_x509_cert_url": _get_env_var("client_x509_cert_url"),
-        "universe_domain": _get_env_var("universe_domain") or "googleapis.com",
-    }
-
-    # Minimal required fields to authenticate
-    required = ["project_id", "private_key", "client_email", "token_uri"]
-    if not all(fields.get(k) for k in required):
-        return None
-
-    # Ensure type and fix private_key newlines if necessary
-    info = {"type": "service_account", **fields}
+# --------------------------------------------------------------------------------
+# ✅ Decode Base64 service account JSON (Option A) and set GOOGLE_APPLICATION_CREDENTIALS
+# --------------------------------------------------------------------------------
+service_account_b64 = os.environ.get("GCP_SERVICE_ACCOUNT_BASE64")
+if service_account_b64:
+    sa_path = "/tmp/service-account.json"
     try:
-        # Vercel commonly stores newlines as escaped sequences
-        info["private_key"] = info["private_key"].replace("\\n", "\n")
-    except Exception:
-        pass
-    return info
+        with open(sa_path, "wb") as f:
+            f.write(base64.b64decode(service_account_b64))
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = sa_path
+        logging.info(f"✅ Service account JSON written to {sa_path}")
+    except Exception as e:
+        logging.error(f"❌ Failed to decode service account JSON: {e}")
+else:
+    logging.warning("⚠️ GCP_SERVICE_ACCOUNT_BASE64 not set. Vertex AI may fail to authenticate.")
 
 # Initialize Redis connection for Upstash
 redis_url = os.environ.get("UPSTASH_REDIS_URL")
@@ -112,156 +77,91 @@ name = "Fae"  # The bot will consider this person as its owner or creator
 bot_name = "Rudo"  # This will be the name of your bot, eg: "Hello I am Astro Bot"
 AGENT = "+263719835124"  # Fixed: added quotes to make it a string
 
-# Vertex AI Endpoint Configuration (UPDATED)
+# Vertex AI Endpoint Configuration (kept from original)
 VERTEX_AI_ENDPOINT_ID = "9216603443274186752"
 VERTEX_AI_REGION = "us-west4"
 VERTEX_AI_PROJECT = os.environ.get("VERTEX_AI_PROJECT")
-# Optional numeric project number for dedicated prediction domain
-VERTEX_AI_PROJECT_NUMBER = os.environ.get("VERTEX_AI_PROJECT_NUMBER")
-# Optional: inline credentials JSON (alternative to GOOGLE_APPLICATION_CREDENTIALS file)
-GOOGLE_APPLICATION_CREDENTIALS_JSON = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+# MEDSIGLIP_API_KEY is no longer used for Vertex AI authentication (ADC is used instead)
+MEDSIGLIP_API_KEY = os.environ.get("MEDSIGLIP_API")
 
-# If VERTEX_AI_PROJECT not provided, try to infer from individual SA env vars
-if not VERTEX_AI_PROJECT:
-    try:
-        inferred_project = _get_env_var("project_id")
-        if inferred_project:
-            VERTEX_AI_PROJECT = inferred_project
-            logging.info("Inferred VERTEX_AI_PROJECT from service account env vars")
-    except Exception:
-        pass
-
+# --------------------------------------------------------------------------------
+# Replaced VertexAIClient — uses ADC (Application Default Credentials)
+# --------------------------------------------------------------------------------
 class VertexAIClient:
     def __init__(self, project_id, endpoint_id, region="us-west4"):
         self.project_id = project_id
         self.endpoint_id = endpoint_id
         self.region = region
 
-        # Standard public Vertex AI endpoint
-        self.base_url = f"https://{region}-aiplatform.googleapis.com/v1"
-
-        # Optional dedicated prediction domain requires numeric project number
-        self.dedicated_endpoint_url = None
-        if VERTEX_AI_PROJECT_NUMBER:
-            self.dedicated_endpoint_url = (
-                f"https://{region}-{VERTEX_AI_PROJECT_NUMBER}.prediction.vertexai.goog/v1/"
-                f"projects/{project_id}/locations/{region}/endpoints/{endpoint_id}:predict"
-            )
-            logging.info(f"Using dedicated endpoint URL: {self.dedicated_endpoint_url}")
-
-        # Initialize Google credentials (ADC)
-        self.credentials = None
+        # Use Application Default Credentials (reads from GOOGLE_APPLICATION_CREDENTIALS or ADC)
         try:
-            if GOOGLE_APPLICATION_CREDENTIALS_JSON:
-                info = json.loads(GOOGLE_APPLICATION_CREDENTIALS_JSON)
-                self.credentials = service_account.Credentials.from_service_account_info(
-                    info,
-                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
-                )
-                logging.info("Loaded Google credentials from GOOGLE_APPLICATION_CREDENTIALS_JSON")
-            else:
-                # Try individual environment variables matching SA JSON fields
-                env_info = load_service_account_info_from_env()
-                if env_info:
-                    self.credentials = service_account.Credentials.from_service_account_info(
-                        env_info,
-                        scopes=["https://www.googleapis.com/auth/cloud-platform"],
-                    )
-                    logging.info("Loaded Google credentials from individual service account env vars")
-                else:
-                    # Fallback to ADC
-                    self.credentials, _ = google.auth.default(
-                        scopes=["https://www.googleapis.com/auth/cloud-platform"]
-                    )
-                    logging.info("Loaded Application Default Credentials for Google auth")
+            self.credentials, detected_project = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+            # If VERTEX_AI_PROJECT wasn't provided, use detected project
+            if not self.project_id and detected_project:
+                self.project_id = detected_project
+            # Ensure token is valid right away
+            self.credentials.refresh(Request())
+            logging.info("✅ Obtained ADC credentials for Vertex AI")
         except Exception as e:
-            logging.error(f"Failed to load Google credentials: {e}")
-            self.credentials = None
+            logging.error(f"❌ Failed to obtain ADC credentials: {e}")
+            raise
+
+        # Standard Vertex AI REST endpoint for predictions
+        self.endpoint_url = (
+            f"https://{region}-aiplatform.googleapis.com/v1/projects/{self.project_id}/locations/{region}/endpoints/{endpoint_id}:predict"
+        )
+
+        logging.info(f"Using Vertex AI endpoint URL: {self.endpoint_url}")
 
     def get_auth_header(self):
-        """Get OAuth2 Bearer token header from Google credentials."""
-        if not self.credentials:
-            logging.error("Google credentials not available for Vertex AI authentication")
-            return {}
-        try:
-            if not self.credentials.valid:
-                self.credentials.refresh(GoogleAuthRequest())
-            return {"Authorization": f"Bearer {self.credentials.token}"}
-        except Exception as e:
-            logging.error(f"Failed to refresh Google credentials: {e}")
-            return {}
-    
-    def predict(self, instances):
-        """Make prediction using Vertex AI endpoint with OAuth2 authentication"""
-        # Try dedicated endpoint (if configured) first, then fallback to standard REST API
-        urls_to_try = []
-        if self.dedicated_endpoint_url:
-            urls_to_try.append(self.dedicated_endpoint_url)
-        urls_to_try.append(
-            f"{self.base_url}/projects/{self.project_id}/locations/{self.region}/endpoints/{self.endpoint_id}:predict"
-        )
-        
-        for i, url in enumerate(urls_to_try):
-            headers = {
-                "Content-Type": "application/json"
-            }
-            
-            # Add OAuth2 authentication
-            auth_headers = self.get_auth_header()
-            headers.update(auth_headers)
-            
-            # Prepare the request payload for MedSigLip model
-            payload = {
-                "instances": instances
-            }
-            
-            try:
-                logging.info(f"Attempt {i+1}: Sending prediction request to Vertex AI endpoint: {url}")
-                response = requests.post(url, headers=headers, json=payload, timeout=30)
-                response.raise_for_status()
-                result = response.json()
-                logging.info(f"Vertex AI prediction successful using URL {i+1}")
-                return result
-            except requests.exceptions.Timeout:
-                logging.error(f"Vertex AI request timed out for URL {i+1}")
-                if i == len(urls_to_try) - 1:  # Last attempt
-                    return {"error": "Request timeout - please try again"}
-            except requests.exceptions.RequestException as e:
-                status_code = getattr(getattr(e, "response", None), "status_code", None)
-                body_text = getattr(getattr(e, "response", None), "text", "")
-                logging.error(f"Vertex AI API request failed for URL {i+1}: {e}")
-                if status_code:
-                    logging.error(f"Response status: {status_code}")
-                    logging.error(f"Response body: {body_text}")
-                if i == len(urls_to_try) - 1:  # Last attempt
-                    if status_code in (401, 403):
-                        guidance = (
-                            "Authentication failed. Ensure Google ADC is configured: set GOOGLE_APPLICATION_CREDENTIALS "
-                            "to a service account JSON with Vertex AI permissions, or deploy with a GCP service account "
-                            "that has access to the endpoint."
-                        )
-                        return {"error": f"{e}. {guidance}"}
-                    return {"error": f"API request failed: {str(e)}"}
-        
-        return {"error": "All endpoint URLs failed"}
+        if not self.credentials.valid:
+            self.credentials.refresh(Request())
+        return {"Authorization": f"Bearer {self.credentials.token}"}
 
-# Initialize Vertex AI client with correct endpoint configuration
+    def predict(self, instances):
+        headers = {
+            "Content-Type": "application/json",
+            **self.get_auth_header()
+        }
+
+        payload = {"instances": instances}
+
+        try:
+            logging.info(f"Sending prediction request to Vertex AI endpoint: {self.endpoint_url}")
+            response = requests.post(self.endpoint_url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            result = response.json()
+            logging.info("Vertex AI prediction successful")
+            return result
+        except requests.exceptions.Timeout:
+            logging.error("Vertex AI request timed out")
+            return {"error": "Request timeout - please try again"}
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Vertex AI API request failed: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logging.error(f"Response status: {e.response.status_code}")
+                logging.error(f"Response body: {e.response.text}")
+            return {"error": f"API request failed: {str(e)}"}
+
+# Initialize Vertex AI client with ADC
 vertex_ai_client = None
 if VERTEX_AI_PROJECT and VERTEX_AI_ENDPOINT_ID:
     try:
         vertex_ai_client = VertexAIClient(
-            VERTEX_AI_PROJECT, 
-            VERTEX_AI_ENDPOINT_ID, 
-            VERTEX_AI_REGION,
+            VERTEX_AI_PROJECT,
+            VERTEX_AI_ENDPOINT_ID,
+            VERTEX_AI_REGION
         )
-        logging.info("Vertex AI client initialized successfully with Google OAuth2 authentication")
+        logging.info("Vertex AI client initialized successfully with ADC authentication")
     except Exception as e:
         logging.error(f"Failed to initialize Vertex AI client: {e}")
         vertex_ai_client = None
 else:
-    logging.warning("Vertex AI project or endpoint ID not set, cervical cancer staging disabled")
+    logging.warning("Vertex AI project, endpoint ID not set, cervical cancer staging disabled")
     if not VERTEX_AI_PROJECT:
         logging.error("VERTEX_AI_PROJECT environment variable is required")
+    if not VERTEX_AI_ENDPOINT_ID:
+        logging.error("VERTEX_AI_ENDPOINT_ID environment variable is required")
 
 app = Flask(__name__)
 genai.configure(api_key=gen_api)
@@ -752,7 +652,7 @@ def handle_patient_id(sender, prompt, phone_id):
     elif lang == "lozi":
         send("Ni itumezi! Kacenu, ni lu tumela sitapi sa ku kekula.", sender, phone_id)
     else:
-        send("Thank you! Now you can upload the image for augmented VIA analysis", sender, phone_id)
+        send("Thank you! Now you can upload the image for amplified VIA analysis", sender, phone_id)
     
     save_user_state(sender, state)
 
