@@ -17,6 +17,7 @@ import redis
 import json
 import re
 import base64
+from google.cloud import aiplatform
 
 # NEW imports for Google Application Default Credentials (ADC)
 import google.auth
