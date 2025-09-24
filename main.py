@@ -416,12 +416,10 @@ def stage_cervical_cancer(image_path):
                         "input_bytes": base64.b64encode(image_data).decode("utf-8")
                     }
                 }
-            ],
-            "text": "A cervical screening image for analysis"
+            ]
         }
 
-        # 🔍 Log payload before sending
-        logging.info(f"Vertex request payload: {json.dumps(payload)[:1000]}...")
+        logging.info(f"Vertex request payload: {json.dumps(payload)[:500]}...")
 
         prediction_result = vertex_ai_client.predict(payload)
 
