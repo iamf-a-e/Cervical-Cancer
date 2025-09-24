@@ -661,19 +661,7 @@ def handle_language_detection(sender, prompt, phone_id):
     user_states[sender]["needs_language_confirmation"] = False
 
     # Send appropriate greeting based on language
-    if detected_lang == "shona":
-        send("Mhoro! Ndinonzi Rudo, mubatsiri wepamhepo weDawa Health. Reggai titange nekunyoresa. Worker ID yenyu ndeyipi?", sender, phone_id)
-    elif detected_lang == "ndebele":
-        send("Sawubona! Ngingu Rudo, isiphathamandla se-Dawa Health. Masige saqala ngokubhalisa. I-Worker ID yakho ithini?", sender, phone_id)
-    elif detected_lang == "tonga":
-        send("Mwabuka buti! Nine Rudo, munisanga wa Dawa Health. Tuyambile mukubhaliska. Worker ID yobe iyi?", sender, phone_id)
-    elif detected_lang == "chinyanja":
-        send("Moni! Ndine Rudo, katandizi wa Dawa Health. Tiyambireni ndikulembetsani. Worker ID yanu ndi yotani?", sender, phone_id)
-    elif detected_lang == "bemba":
-        send("Mwashibukeni! Nine Rudo, umushishi wa Dawa Health. Tulembefye. Worker ID yobe ili shani?", sender, phone_id)
-    elif detected_lang == "lozi":
-        send("Muzuhile! Nine Rudo, musiyami wa Dawa Health. Re kae ku sa felisize. Worker ID ya hao ki i?", sender, phone_id)
-    else:
+    if detected_lang == "english":        
         send("Hello! I'm Rudo, Dawa Health's virtual assistant. Let's start with registration. What is your Worker ID?", sender, phone_id)
     
     save_user_state(sender, user_states[sender])
