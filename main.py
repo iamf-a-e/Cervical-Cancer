@@ -23,6 +23,58 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 
 logging.basicConfig(level=logging.INFO)
 
+# --------------------------
+# Google SA env var loader
+# --------------------------
+def _get_env_var(*names):
+    """Return the first present env var value among provided names.
+    Tries given names as-is, UPPERCASE, and lowercase variants.
+    """
+    for name in names:
+        val = (
+            os.environ.get(name)
+            or os.environ.get(name.upper())
+            or os.environ.get(name.lower())
+        )
+        if val is not None:
+            return val
+    return None
+
+def load_service_account_info_from_env():
+    """Load Google service account JSON fields from individual environment variables.
+    Expects keys matching service account JSON: project_id, private_key_id, private_key,
+    client_email, client_id, auth_uri, token_uri, auth_provider_x509_cert_url,
+    client_x509_cert_url, universe_domain.
+    Returns a dict suitable for service_account.Credentials.from_service_account_info
+    or None if required fields are missing.
+    """
+    fields = {
+        "project_id": _get_env_var("project_id"),
+        "private_key_id": _get_env_var("private_key_id"),
+        "private_key": _get_env_var("private_key"),
+        "client_email": _get_env_var("client_email"),
+        "client_id": _get_env_var("client_id"),
+        "auth_uri": _get_env_var("auth_uri"),
+        "token_uri": _get_env_var("token_uri"),
+        "auth_provider_x509_cert_url": _get_env_var("auth_provider_x509_cert_url"),
+        "client_x509_cert_url": _get_env_var("client_x509_cert_url"),
+        "universe_domain": _get_env_var("universe_domain") or "googleapis.com",
+    }
+
+    # Minimal required fields to authenticate
+    required = ["project_id", "private_key", "client_email", "token_uri"]
+    if not all(fields.get(k) for k in required):
+        return None
+
+    # Ensure type and fix private_key newlines if necessary
+    info = {"type": "service_account", **fields}
+    try:
+        # Vercel commonly stores newlines as escaped sequences
+        info["private_key"] = info["private_key"].replace("\\n", "\n")
+    except Exception:
+        pass
+    return info
+
 # Initialize Redis connection for Upstash
 redis_url = os.environ.get("UPSTASH_REDIS_URL")
 redis_token = os.environ.get("UPSTASH_REDIS_TOKEN")
@@ -69,6 +121,16 @@ VERTEX_AI_PROJECT_NUMBER = os.environ.get("VERTEX_AI_PROJECT_NUMBER")
 # Optional: inline credentials JSON (alternative to GOOGLE_APPLICATION_CREDENTIALS file)
 GOOGLE_APPLICATION_CREDENTIALS_JSON = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
 
+# If VERTEX_AI_PROJECT not provided, try to infer from individual SA env vars
+if not VERTEX_AI_PROJECT:
+    try:
+        inferred_project = _get_env_var("project_id")
+        if inferred_project:
+            VERTEX_AI_PROJECT = inferred_project
+            logging.info("Inferred VERTEX_AI_PROJECT from service account env vars")
+    except Exception:
+        pass
+
 class VertexAIClient:
     def __init__(self, project_id, endpoint_id, region="us-west4"):
         self.project_id = project_id
@@ -98,10 +160,20 @@ class VertexAIClient:
                 )
                 logging.info("Loaded Google credentials from GOOGLE_APPLICATION_CREDENTIALS_JSON")
             else:
-                self.credentials, _ = google.auth.default(
-                    scopes=["https://www.googleapis.com/auth/cloud-platform"]
-                )
-                logging.info("Loaded Application Default Credentials for Google auth")
+                # Try individual environment variables matching SA JSON fields
+                env_info = load_service_account_info_from_env()
+                if env_info:
+                    self.credentials = service_account.Credentials.from_service_account_info(
+                        env_info,
+                        scopes=["https://www.googleapis.com/auth/cloud-platform"],
+                    )
+                    logging.info("Loaded Google credentials from individual service account env vars")
+                else:
+                    # Fallback to ADC
+                    self.credentials, _ = google.auth.default(
+                        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                    )
+                    logging.info("Loaded Application Default Credentials for Google auth")
         except Exception as e:
             logging.error(f"Failed to load Google credentials: {e}")
             self.credentials = None
