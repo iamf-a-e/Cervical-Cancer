@@ -85,33 +85,58 @@ VERTEX_AI_PROJECT = os.environ.get("VERTEX_AI_PROJECT")
 MEDSIGLIP_API_KEY = os.environ.get("MEDSIGLIP_API")
 
 # --------------------------------------------------------------------------------
-# Replaced VertexAIClient — uses ADC (Application Default Credentials)
+# ✅ CORRECTED VertexAIClient — uses ADC (Application Default Credentials)
 # --------------------------------------------------------------------------------
 class VertexAIClient:
-    def __init__(self):
-        # The correct dedicated endpoint URL
-        self.base_url = "https://9216603443274186752.us-west4-519460264942.prediction.vertexai.goog"
-        self.project_id = "ninja-427218"
-        self.location = "us-west4"
-        self.endpoint_id = "9216603443274186752"
-        self.headers = self.get_auth_headers()
+    def __init__(self, project_id, endpoint_id, location):
+        self.project_id = project_id
+        self.endpoint_id = endpoint_id
+        self.location = location
+        self.base_url = f"https://{endpoint_id}.{location}-519460264942.prediction.vertexai.goog"
+        
+        # Initialize credentials for ADC
+        try:
+            self.credentials, _ = google.auth.default()
+            logging.info("✅ ADC credentials initialized successfully")
+        except Exception as e:
+            logging.error(f"❌ Failed to initialize ADC credentials: {e}")
+            self.credentials = None
 
-    def get_auth_header(self):
+    def get_auth_headers(self):
+        """Get authentication headers using ADC"""
+        if not self.credentials:
+            return {}
+            
         if not self.credentials.valid:
-            self.credentials.refresh(Request())
-        return {"Authorization": f"Bearer {self.credentials.token}"}
+            try:
+                self.credentials.refresh(Request())
+            except Exception as e:
+                logging.error(f"❌ Failed to refresh credentials: {e}")
+                return {}
+                
+        return {
+            "Authorization": f"Bearer {self.credentials.token}",
+            "Content-Type": "application/json"
+        }
 
     def predict(self, instances):
-        # Construct the URL using the dedicated base_url
+        if not self.credentials:
+            return {"error": "Credentials not available"}
+            
         url = f"{self.base_url}/predict"
-        
-        # Prepare the payload with the instances
         payload = {"instances": instances}
+        headers = self.get_auth_headers()
         
-        # Make the API call
-        response = requests.post(url, json=payload, headers=self.headers)
-        response.raise_for_status()
-        return response.json()
+        if not headers:
+            return {"error": "Failed to get authentication headers"}
+        
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logging.error(f"❌ Prediction request failed: {e}")
+            return {"error": str(e)}
 
 # Initialize Vertex AI client with ADC
 vertex_ai_client = None
@@ -122,12 +147,20 @@ if VERTEX_AI_PROJECT and VERTEX_AI_ENDPOINT_ID:
             VERTEX_AI_ENDPOINT_ID,
             VERTEX_AI_REGION
         )
-        logging.info("Vertex AI client initialized successfully with ADC authentication")
+        
+        # Test the connection with a simple call
+        test_result = vertex_ai_client.predict([{"test": "connection"}])
+        if "error" not in test_result:
+            logging.info("✅ Vertex AI client initialized and tested successfully")
+        else:
+            logging.error(f"❌ Vertex AI client test failed: {test_result}")
+            vertex_ai_client = None
+            
     except Exception as e:
-        logging.error(f"Failed to initialize Vertex AI client: {e}")
+        logging.error(f"❌ Failed to initialize Vertex AI client: {e}")
         vertex_ai_client = None
 else:
-    logging.warning("Vertex AI project, endpoint ID not set, cervical cancer staging disabled")
+    logging.warning("⚠️ Vertex AI environment variables not set")
     if not VERTEX_AI_PROJECT:
         logging.error("VERTEX_AI_PROJECT environment variable is required")
     if not VERTEX_AI_ENDPOINT_ID:
@@ -407,7 +440,6 @@ def stage_cervical_cancer(image_path):
         # Make prediction using the dedicated endpoint
         prediction_result = vertex_ai_client.predict([instance])
         
-              
         if "error" in prediction_result:
             return {
                 "stage": "Error",
@@ -863,9 +895,19 @@ def health_check():
         "timestamp": datetime.now().isoformat(),
         "redis_connected": redis_client is not None,
         "vertex_ai_configured": vertex_ai_client is not None,
+        "vertex_ai_project": VERTEX_AI_PROJECT is not None,
+        "vertex_ai_endpoint": VERTEX_AI_ENDPOINT_ID is not None,
         "gemini_configured": gen_api is not None,
         "whatsapp_configured": wa_token is not None and phone_id is not None
     }
+    
+    # Add more detailed Vertex AI info
+    if vertex_ai_client:
+        status["vertex_ai_details"] = {
+            "project_id": vertex_ai_client.project_id,
+            "endpoint_id": vertex_ai_client.endpoint_id,
+            "base_url": vertex_ai_client.base_url
+        }
     
     # Test Redis connection
     if redis_client:
@@ -877,6 +919,20 @@ def health_check():
             status["status"] = "degraded"
     
     return jsonify(status)
+
+@app.route('/test-vertex', methods=['GET'])
+def test_vertex():
+    """Test Vertex AI connection"""
+    if not vertex_ai_client:
+        return jsonify({"error": "Vertex AI client not configured"}), 500
+    
+    try:
+        # Simple test payload
+        test_payload = [{"test": "connection"}]
+        result = vertex_ai_client.predict(test_payload)
+        return jsonify({"status": "success", "result": result})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # Load user states on startup
 load_user_states()
