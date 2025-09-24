@@ -17,7 +17,6 @@ import redis
 import json
 import re
 import base64
-from google.oauth2 import service_account
 
 logging.basicConfig(level=logging.INFO)
 
@@ -62,16 +61,18 @@ AGENT = "+263719835124"  # Fixed: added quotes to make it a string
 VERTEX_AI_ENDPOINT_ID = "9216603443274186752"
 VERTEX_AI_REGION = "us-west4"
 VERTEX_AI_PROJECT = os.environ.get("VERTEX_AI_PROJECT")
-VERTEX_AI_CREDENTIALS_PATH = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+# Get MedSigLip API Key from environment
+MEDSIGLIP_API_KEY = os.environ.get("MEDSIGLIP_API")
 # Dedicated endpoint domain from the image
 VERTEX_AI_DEDICATED_ENDPOINT = "9216603443274186752.us-west4-519460264942.prediction.vertexai.goog"
 
 class VertexAIClient:
-    def __init__(self, project_id, endpoint_id, region="us-west4", dedicated_endpoint=None):
+    def __init__(self, project_id, endpoint_id, region="us-west4", dedicated_endpoint=None, api_key=None):
         self.project_id = project_id
         self.endpoint_id = endpoint_id
         self.region = region
         self.dedicated_endpoint = dedicated_endpoint
+        self.api_key = api_key
         
         # Use dedicated endpoint if provided, otherwise fall back to standard REST API
         if dedicated_endpoint:
@@ -81,43 +82,20 @@ class VertexAIClient:
             self.base_url = f"https://{region}-aiplatform.googleapis.com/v1"
             logging.info(f"Using standard REST API endpoint: {self.base_url}")
             
-        self.credentials = None
-        self._setup_credentials()
+        # Validate API key
+        if not self.api_key:
+            logging.warning("No MedSigLip API key provided - authentication may fail")
     
-    def _setup_credentials(self):
-        """Setup Google Cloud credentials"""
-        try:
-            if VERTEX_AI_CREDENTIALS_PATH and os.path.exists(VERTEX_AI_CREDENTIALS_PATH):
-                self.credentials = service_account.Credentials.from_service_account_file(
-                    VERTEX_AI_CREDENTIALS_PATH,
-                    scopes=['https://www.googleapis.com/auth/cloud-platform']
-                )
-                logging.info("Vertex AI credentials loaded successfully")
-            else:
-                # Try using default credentials
-                self.credentials = service_account.Credentials.from_service_account_file(
-                    os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
-                    scopes=['https://www.googleapis.com/auth/cloud-platform']
-                )
-                logging.info("Using default Google Cloud credentials")
-        except Exception as e:
-            logging.error(f"Error setting up credentials: {e}")
-            self.credentials = None
-    
-    def get_access_token(self):
-        """Get access token for API requests"""
-        if self.credentials:
-            try:
-                from google.auth.transport.requests import Request
-                if not self.credentials.valid:
-                    self.credentials.refresh(Request())
-                return self.credentials.token
-            except Exception as e:
-                logging.error(f"Error getting access token: {e}")
-        return None
+    def get_auth_header(self):
+        """Get authentication header using API key"""
+        if self.api_key:
+            return {"Authorization": f"Bearer {self.api_key}"}
+        else:
+            logging.error("No API key available for MedSigLip authentication")
+            return {}
     
     def predict(self, instances):
-        """Make prediction using Vertex AI dedicated endpoint"""
+        """Make prediction using Vertex AI dedicated endpoint with API key authentication"""
         # For dedicated endpoints, the URL structure is different
         if self.dedicated_endpoint:
             url = f"https://{self.dedicated_endpoint}/v1/models/default:predict"
@@ -125,14 +103,13 @@ class VertexAIClient:
             # Fallback to standard REST API
             url = f"{self.base_url}/projects/{self.project_id}/locations/{self.region}/endpoints/{self.endpoint_id}:predict"
         
-        token = self.get_access_token()
-        if not token:
-            return {"error": "Could not authenticate with Vertex AI"}
-        
         headers = {
-            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json"
         }
+        
+        # Add API key authentication
+        auth_headers = self.get_auth_header()
+        headers.update(auth_headers)
         
         # Prepare the request payload for MedSigLip model
         # Assuming the model expects image data in base64 format
@@ -157,22 +134,25 @@ class VertexAIClient:
                 logging.error(f"Response body: {e.response.text}")
             return {"error": str(e)}
 
-# Initialize Vertex AI client with dedicated endpoint
+# Initialize Vertex AI client with dedicated endpoint and API key authentication
 vertex_ai_client = None
-if VERTEX_AI_PROJECT and VERTEX_AI_ENDPOINT_ID:
+if VERTEX_AI_PROJECT and VERTEX_AI_ENDPOINT_ID and MEDSIGLIP_API_KEY:
     try:
         vertex_ai_client = VertexAIClient(
             VERTEX_AI_PROJECT, 
             VERTEX_AI_ENDPOINT_ID, 
             VERTEX_AI_REGION,
-            VERTEX_AI_DEDICATED_ENDPOINT
+            VERTEX_AI_DEDICATED_ENDPOINT,
+            MEDSIGLIP_API_KEY
         )
-        logging.info("Vertex AI client initialized successfully with dedicated endpoint")
+        logging.info("Vertex AI client initialized successfully with API key authentication")
     except Exception as e:
         logging.error(f"Failed to initialize Vertex AI client: {e}")
         vertex_ai_client = None
 else:
-    logging.warning("Vertex AI project or endpoint ID not set, cervical cancer staging disabled")
+    logging.warning("Vertex AI project, endpoint ID, or MedSigLip API key not set, cervical cancer staging disabled")
+    if not MEDSIGLIP_API_KEY:
+        logging.error("MEDSIGLIP_API environment variable is required for authentication")
 
 app = Flask(__name__)
 genai.configure(api_key=gen_api)
@@ -420,6 +400,7 @@ def download_whatsapp_media(media_id, file_path):
     except Exception as e:
         logging.error(f"Error downloading WhatsApp media (media_id={media_id}): {e}")
         return False
+
 def stage_cervical_cancer(image_path):
     """Stage cervical cancer using Vertex AI dedicated endpoint with MedSigLip model"""
     if not vertex_ai_client:
@@ -921,7 +902,7 @@ def download_media(media_id):
 
 @app.route("/test-vertex", methods=["GET"])
 def test_vertex():
-    """Test Vertex AI endpoint connectivity"""
+    """Test Vertex AI endpoint connectivity with API key authentication"""
     if not vertex_ai_client:
         return jsonify({"status": "error", "message": "Vertex AI client not configured"})
     
@@ -936,6 +917,7 @@ def test_vertex():
         return jsonify({
             "status": "success",
             "endpoint_used": vertex_ai_client.base_url,
+            "authentication_method": "API Key",
             "response": result
         })
     except Exception as e:
@@ -974,7 +956,8 @@ def get_user_states():
         "user_states": user_states,
         "redis_connected": redis_client is not None,
         "vertex_ai_configured": vertex_ai_client is not None,
-        "vertex_endpoint": VERTEX_AI_DEDICATED_ENDPOINT if vertex_ai_client else None
+        "vertex_endpoint": VERTEX_AI_DEDICATED_ENDPOINT if vertex_ai_client else None,
+        "authentication_method": "API Key"
     })
 
 if __name__ == "__main__":
@@ -982,4 +965,5 @@ if __name__ == "__main__":
     load_user_states()
     logging.info(f"Application started with {len(user_states)} loaded user states")
     logging.info(f"Vertex AI endpoint: {VERTEX_AI_DEDICATED_ENDPOINT}")
+    logging.info(f"Authentication method: API Key")
     app.run(debug=True, port=8000)
