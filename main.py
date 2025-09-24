@@ -428,7 +428,7 @@ def stage_cervical_cancer(image_path):
         # Prepare the prediction instance for MedSigLip model
         # MedSigLip typically expects base64 encoded image
         instance = {
-            "image_bytes": {"b64": base64.b64encode(image_data).decode('utf-8')}
+            "content": base64.b64encode(image_data).decode("utf-8")
         }
         
         # Make prediction using the dedicated endpoint
