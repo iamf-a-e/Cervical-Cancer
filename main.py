@@ -109,15 +109,28 @@ class VertexAIClient:
             self.credentials.refresh(Request())
         return {"Authorization": f"Bearer {self.credentials.token}"}
 
-    def predict(self, instances):
+    def predict(self, payload):
         headers = self.get_auth_header()
         headers["Content-Type"] = "application/json"
+    
+        try:
+            response = requests.post(
+                self.base_url, json=payload, headers=headers, timeout=60
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.HTTPError as http_err:
+            # Log full error response for debugging
+            try:
+                error_text = response.text
+            except Exception:
+                error_text = str(http_err)
+            logging.error(f"Vertex AI HTTP error: {http_err} | Response: {error_text}")
+            raise
+        except Exception as e:
+            logging.error(f"Vertex AI request failed: {e}")
+            raise
 
-        payload = {"instances": instances}
-
-        response = requests.post(self.base_url, json=payload, headers=headers, timeout=60)
-        response.raise_for_status()
-        return response.json()
 
 vertex_ai_client = None
 if VERTEX_AI_PROJECT and VERTEX_AI_ENDPOINT_ID:
@@ -393,25 +406,27 @@ def stage_cervical_cancer(image_path):
         }
 
     try:
-        # Read and encode the image as base64
         with open(image_path, "rb") as f:
             image_data = f.read()
 
-        # ✅ Use correct schema: input_bytes + single text string
-        instance = {
-            "image": {
-                "input_bytes": base64.b64encode(image_data).decode("utf-8")
-            }
-        }
-
         payload = {
-            "instances": [instance],
+            "instances": [
+                {
+                    "image": {
+                        "input_bytes": base64.b64encode(image_data).decode("utf-8")
+                    }
+                }
+            ],
             "text": "A cervical screening image for analysis"
         }
 
-        prediction_result = vertex_ai_client.predict(payload["instances"])
+        # 🔍 Log payload before sending
+        logging.info(f"Vertex request payload: {json.dumps(payload)[:1000]}...")
+
+        prediction_result = vertex_ai_client.predict(payload)
 
         if "predictions" not in prediction_result:
+            logging.error(f"Unexpected Vertex response: {prediction_result}")
             return {
                 "stage": "Error",
                 "confidence": 0,
@@ -421,7 +436,6 @@ def stage_cervical_cancer(image_path):
 
         prediction = prediction_result["predictions"][0]
 
-        # Handle classification-like output
         if "displayNames" in prediction and "confidences" in prediction:
             labels = prediction["displayNames"]
             scores = prediction["confidences"]
@@ -802,7 +816,7 @@ def message_handler(data, phone_id):
 
 @app.route('/', methods=['GET'])
 def home():
-    return render_template('index.html')
+    return render_template('connected.html')
 
 @app.route('/webhook', methods=['GET'])
 def webhook():
