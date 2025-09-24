@@ -87,58 +87,39 @@ MEDSIGLIP_API_KEY = os.environ.get("MEDSIGLIP_API")
 # --------------------------------------------------------------------------------
 # ✅ CORRECTED VertexAIClient — uses ADC (Application Default Credentials)
 # --------------------------------------------------------------------------------
+
 class VertexAIClient:
-    def __init__(self, project_id, endpoint_id, location):
+    def __init__(self, project_id, endpoint_id, location="us-west4"):
         self.project_id = project_id
         self.endpoint_id = endpoint_id
         self.location = location
-        self.base_url = f"https://{endpoint_id}.{location}-519460264942.prediction.vertexai.goog"
-        
-        # Initialize credentials for ADC
-        try:
-            self.credentials, _ = google.auth.default()
-            logging.info("✅ ADC credentials initialized successfully")
-        except Exception as e:
-            logging.error(f"❌ Failed to initialize ADC credentials: {e}")
-            self.credentials = None
 
-    def get_auth_headers(self):
-        """Get authentication headers using ADC"""
-        if not self.credentials:
-            return {}
-            
+        # Build the correct endpoint base URL
+        self.base_url = (
+            f"https://{location}-aiplatform.googleapis.com/v1/projects/"
+            f"{project_id}/locations/{location}/endpoints/{endpoint_id}:predict"
+        )
+
+        # Get default ADC credentials
+        self.credentials, _ = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
         if not self.credentials.valid:
-            try:
-                self.credentials.refresh(Request())
-            except Exception as e:
-                logging.error(f"❌ Failed to refresh credentials: {e}")
-                return {}
-                
-        return {
-            "Authorization": f"Bearer {self.credentials.token}",
-            "Content-Type": "application/json"
-        }
+            self.credentials.refresh(Request())
+
+    def get_auth_header(self):
+        if not self.credentials.valid:
+            self.credentials.refresh(Request())
+        return {"Authorization": f"Bearer {self.credentials.token}"}
 
     def predict(self, instances):
-        if not self.credentials:
-            return {"error": "Credentials not available"}
-            
-        url = f"{self.base_url}/predict"
-        payload = {"instances": instances}
-        headers = self.get_auth_headers()
-        
-        if not headers:
-            return {"error": "Failed to get authentication headers"}
-        
-        try:
-            response = requests.post(url, json=payload, headers=headers, timeout=30)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            logging.error(f"❌ Prediction request failed: {e}")
-            return {"error": str(e)}
+        headers = self.get_auth_header()
+        headers["Content-Type"] = "application/json"
 
-# Initialize Vertex AI client with ADC
+        payload = {"instances": instances}
+
+        response = requests.post(self.base_url, json=payload, headers=headers, timeout=60)
+        response.raise_for_status()
+        return response.json()
+
 vertex_ai_client = None
 if VERTEX_AI_PROJECT and VERTEX_AI_ENDPOINT_ID:
     try:
@@ -147,25 +128,14 @@ if VERTEX_AI_PROJECT and VERTEX_AI_ENDPOINT_ID:
             VERTEX_AI_ENDPOINT_ID,
             VERTEX_AI_REGION
         )
-        
-        # Test the connection with a simple call
-        test_result = vertex_ai_client.predict([{"test": "connection"}])
-        if "error" not in test_result:
-            logging.info("✅ Vertex AI client initialized and tested successfully")
-        else:
-            logging.error(f"❌ Vertex AI client test failed: {test_result}")
-            vertex_ai_client = None
-            
+        logging.info("Vertex AI client initialized successfully with ADC authentication")
     except Exception as e:
-        logging.error(f"❌ Failed to initialize Vertex AI client: {e}")
+        logging.error(f"Failed to initialize Vertex AI client: {e}")
         vertex_ai_client = None
 else:
-    logging.warning("⚠️ Vertex AI environment variables not set")
-    if not VERTEX_AI_PROJECT:
-        logging.error("VERTEX_AI_PROJECT environment variable is required")
-    if not VERTEX_AI_ENDPOINT_ID:
-        logging.error("VERTEX_AI_ENDPOINT_ID environment variable is required")
+    logging.warning("Vertex AI project, endpoint ID not set, cervical cancer staging disabled")
 
+    
 app = Flask(__name__)
 genai.configure(api_key=gen_api)
 
@@ -414,7 +384,7 @@ def download_whatsapp_media(media_id, file_path):
         return False
 
 def stage_cervical_cancer(image_path):
-    """Stage cervical cancer using Vertex AI dedicated endpoint with MedSigLip model"""
+    """Stage cervical cancer using Vertex AI endpoint with MedSigLip model"""
     if not vertex_ai_client:
         return {
             "stage": "Error",
@@ -422,76 +392,52 @@ def stage_cervical_cancer(image_path):
             "success": False,
             "error": "Vertex AI client not configured"
         }
-    
+
     try:
-        # Read and encode the image
+        # Read and encode the image as base64
         with open(image_path, "rb") as f:
             image_data = f.read()
-        
-        # Prepare the prediction instance with the correct 'image' and 'text' keys
+
         instance = {
-            "image": {
-                "input_bytes": base64.b64encode(image_data).decode('utf-8')
-            },
-            # Provide a list of candidate labels for zero-shot classification
-            "text": ["normal", "abnormal", "cervical cancer"]
+            "image": {"bytesBase64Encoded": base64.b64encode(image_data).decode("utf-8")},
+            "text": ["normal", "abnormal", "cervical cancer"]  # candidate labels
         }
-        
-        # Make prediction using the dedicated endpoint
+
+        # Send prediction
         prediction_result = vertex_ai_client.predict([instance])
-        
-        if "error" in prediction_result:
+
+        if "predictions" not in prediction_result:
             return {
                 "stage": "Error",
                 "confidence": 0,
                 "success": False,
-                "error": prediction_result["error"]
+                "error": f"Unexpected response format: {prediction_result}"
             }
-        
-        # Process the prediction results for MedSigLip model
-        # Adjust these keys based on your MedSigLip model's actual output format
-        if "predictions" in prediction_result and len(prediction_result["predictions"]) > 0:
-            results = prediction_result["predictions"][0]
-            
-            # MedSigLip model output structure may vary - adjust accordingly
-            if isinstance(results, dict):
-                # If results are a dictionary with stage/confidence
-                stage = results.get('stage', results.get('class', results.get('prediction', 'Unknown')))
-                confidence = results.get('confidence', results.get('score', results.get('probability', 0)))
-            elif isinstance(results, list):
-                # If results are a list of predictions
-                stage = "Stage " + str(results[0]) if results else "Unknown"
-                confidence = results[1] if len(results) > 1 else 0
-            else:
-                # Fallback for unknown format
-                stage = str(results)
-                confidence = 0.5
-            
+
+        prediction = prediction_result["predictions"][0]
+
+        # Handle classification-like output
+        if "displayNames" in prediction and "confidences" in prediction:
+            labels = prediction["displayNames"]
+            scores = prediction["confidences"]
+
+            max_idx = scores.index(max(scores))
+            stage = labels[max_idx]
+            confidence = scores[max_idx]
+
             return {
                 "stage": stage,
                 "confidence": float(confidence),
                 "success": True
             }
-        elif "outputs" in prediction_result:
-            # Alternative output format
-            outputs = prediction_result["outputs"]
-            stage = outputs[0] if outputs else "Unknown"
-            confidence = outputs[1] if len(outputs) > 1 else 0.5
-            
-            return {
-                "stage": stage,
-                "confidence": float(confidence),
-                "success": True
-            }
-        else:
-            logging.warning(f"Unexpected prediction result format: {prediction_result}")
-            return {
-                "stage": "Error",
-                "confidence": 0,
-                "success": False,
-                "error": "Unexpected response format from model"
-            }
-            
+
+        # Fallback: handle unknown formats
+        return {
+            "stage": str(prediction),
+            "confidence": 0,
+            "success": True
+        }
+
     except Exception as e:
         logging.error(f"Error in cervical cancer staging: {e}")
         return {
@@ -500,6 +446,7 @@ def stage_cervical_cancer(image_path):
             "success": False,
             "error": str(e)
         }
+
 
 # Database setup (optional)
 db = False
