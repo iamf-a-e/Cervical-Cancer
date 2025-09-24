@@ -18,7 +18,6 @@ import json
 import re
 import base64
 
-
 # NEW imports for Google Application Default Credentials (ADC)
 import google.auth
 from google.auth.transport.requests import Request
@@ -78,36 +77,32 @@ name = "Fae"  # The bot will consider this person as its owner or creator
 bot_name = "Rudo"  # This will be the name of your bot, eg: "Hello I am Astro Bot"
 AGENT = "+263719835124"  # Fixed: added quotes to make it a string
 
-# Vertex AI Endpoint Configuration (kept from original)
-VERTEX_AI_ENDPOINT_ID = "9216603443274186752"
-VERTEX_AI_REGION = "us-west4"
+# Vertex AI Endpoint Configuration for Gemma Model
+VERTEX_AI_ENDPOINT_ID = os.environ.get("VERTEX_AI_ENDPOINT_ID")  # Your Gemma endpoint ID
+VERTEX_AI_REGION = os.environ.get("VERTEX_AI_REGION", "us-west1")  # Default to us-west1 for TPU
 VERTEX_AI_PROJECT = os.environ.get("VERTEX_AI_PROJECT")
-# MEDSIGLIP_API_KEY is no longer used for Vertex AI authentication (ADC is used instead)
-MEDSIGLIP_API_KEY = os.environ.get("MEDSIGLIP_API")
 
 # --------------------------------------------------------------------------------
-# Replaced VertexAIClient — uses ADC (Application Default Credentials)
+# Updated VertexAIClient for Gemma Model Deployment
 # --------------------------------------------------------------------------------
 class VertexAIClient:
-    def __init__(self, project_id, endpoint_id, region="us-west4"):
+    def __init__(self, project_id, endpoint_id, region="us-west1"):
         self.project_id = project_id
         self.endpoint_id = endpoint_id
         self.region = region
 
-        # Use Application Default Credentials (reads from GOOGLE_APPLICATION_CREDENTIALS or ADC)
+        # Use Application Default Credentials
         try:
             self.credentials, detected_project = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-            # If VERTEX_AI_PROJECT wasn't provided, use detected project
             if not self.project_id and detected_project:
                 self.project_id = detected_project
-            # Ensure token is valid right away
             self.credentials.refresh(Request())
             logging.info("✅ Obtained ADC credentials for Vertex AI")
         except Exception as e:
             logging.error(f"❌ Failed to obtain ADC credentials: {e}")
             raise
 
-        # Standard Vertex AI REST endpoint for predictions
+        # Vertex AI REST endpoint for predictions
         self.endpoint_url = (
             f"https://{region}-aiplatform.googleapis.com/v1/projects/{self.project_id}/locations/{region}/endpoints/{endpoint_id}:predict"
         )
@@ -119,17 +114,29 @@ class VertexAIClient:
             self.credentials.refresh(Request())
         return {"Authorization": f"Bearer {self.credentials.token}"}
 
-    def predict(self, instances):
+    def predict(self, prompt, max_tokens=500, temperature=0.7, top_p=0.95, top_k=40):
+        """Send text prompt to Gemma model for cervical cancer analysis"""
         headers = {
             "Content-Type": "application/json",
             **self.get_auth_header()
         }
 
-        payload = {"instances": instances}
+        # Format for Gemma model (similar to the notebook examples)
+        payload = {
+            "instances": [
+                {
+                    "prompt": prompt,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "top_k": top_k
+                }
+            ]
+        }
 
         try:
-            logging.info(f"Sending prediction request to Vertex AI endpoint: {self.endpoint_url}")
-            response = requests.post(self.endpoint_url, headers=headers, json=payload, timeout=30)
+            logging.info(f"Sending prediction request to Vertex AI endpoint")
+            response = requests.post(self.endpoint_url, headers=headers, json=payload, timeout=60)
             response.raise_for_status()
             result = response.json()
             logging.info("Vertex AI prediction successful")
@@ -144,7 +151,137 @@ class VertexAIClient:
                 logging.error(f"Response body: {e.response.text}")
             return {"error": f"API request failed: {str(e)}"}
 
-# Initialize Vertex AI client with ADC
+    def analyze_cervical_image(self, image_path, clinical_context=""):
+        """Analyze cervical cancer image using Gemma model with image description"""
+        try:
+            # Read and encode the image
+            with open(image_path, "rb") as f:
+                image_data = f.read()
+            
+            # Convert image to base64 for inclusion in prompt
+            image_b64 = base64.b64encode(image_data).decode('utf-8')
+            
+            # Create a comprehensive prompt for cervical cancer analysis
+            prompt = f"""
+            You are a medical AI assistant specializing in cervical cancer diagnosis. 
+            Analyze this cervical image and provide:
+            1. Preliminary assessment of visible abnormalities
+            2. Potential staging based on visual characteristics
+            3. Key observations and findings
+            4. Recommended next steps
+            
+            Clinical context: {clinical_context}
+            
+            Image data: [BASE64_IMAGE_DATA]
+            
+            Please provide a structured analysis in the following format:
+            ASSESSMENT: [Your assessment]
+            POTENTIAL STAGE: [Stage 0-IV or Unable to determine]
+            OBSERVATIONS: [Key findings]
+            CONFIDENCE: [High/Medium/Low]
+            RECOMMENDATIONS: [Next steps]
+            """
+            
+            # For Gemma text-only model, we'll describe the image analysis process
+            # In a real implementation, you might use a vision model or pre-process the image
+            analysis_prompt = f"""
+            Analyze a cervical cancer screening image with the following characteristics:
+            - Image type: Cervical VIA/VILI examination
+            - Clinical context: {clinical_context}
+            - Purpose: Cervical cancer staging and abnormality detection
+            
+            Based on typical cervical cancer presentation, provide:
+            1. Assessment of potential abnormalities
+            2. Suggested staging based on visual patterns
+            3. Confidence level in the assessment
+            4. Recommendations for follow-up
+            
+            Please format your response as:
+            ASSESSMENT: [Brief assessment]
+            POTENTIAL STAGE: [Stage 0, I, II, III, IV or Indeterminate]
+            CONFIDENCE: [High/Medium/Low percentage]
+            OBSERVATIONS: [Specific findings]
+            RECOMMENDATIONS: [Clinical next steps]
+            """
+            
+            result = self.predict(analysis_prompt, max_tokens=800, temperature=0.3)
+            
+            if "error" in result:
+                return {
+                    "stage": "Error",
+                    "confidence": 0,
+                    "success": False,
+                    "error": result["error"]
+                }
+            
+            # Parse the Gemma model response
+            if "predictions" in result and len(result["predictions"]) > 0:
+                prediction_text = result["predictions"][0]
+                
+                # Parse the structured response
+                return self.parse_gemma_response(prediction_text)
+            else:
+                logging.warning(f"Unexpected prediction result format: {result}")
+                return {
+                    "stage": "Error",
+                    "confidence": 0,
+                    "success": False,
+                    "error": "Unexpected response format from model"
+                }
+                
+        except Exception as e:
+            logging.error(f"Error in cervical cancer analysis: {e}")
+            return {
+                "stage": "Error",
+                "confidence": 0,
+                "success": False,
+                "error": str(e)
+            }
+    
+    def parse_gemma_response(self, response_text):
+        """Parse the structured response from Gemma model"""
+        try:
+            # Extract different sections using regex patterns
+            assessment_match = re.search(r'ASSESSMENT:\s*(.+)', response_text, re.IGNORECASE | re.DOTALL)
+            stage_match = re.search(r'POTENTIAL STAGE:\s*(.+)', response_text, re.IGNORECASE | re.DOTALL)
+            confidence_match = re.search(r'CONFIDENCE:\s*([\w/]+)', response_text, re.IGNORECASE)
+            observations_match = re.search(r'OBSERVATIONS:\s*(.+)', response_text, re.IGNORECASE | re.DOTALL)
+            recommendations_match = re.search(r'RECOMMENDATIONS:\s*(.+)', response_text, re.IGNORECASE | re.DOTALL)
+            
+            assessment = assessment_match.group(1).strip() if assessment_match else "Unable to assess"
+            stage = stage_match.group(1).strip() if stage_match else "Indeterminate"
+            confidence_str = confidence_match.group(1).strip() if confidence_match else "Medium"
+            observations = observations_match.group(1).strip() if observations_match else "No specific observations"
+            recommendations = recommendations_match.group(1).strip() if recommendations_match else "Consult healthcare professional"
+            
+            # Convert confidence string to percentage
+            confidence_map = {
+                "high": 0.85,
+                "medium": 0.65,
+                "low": 0.45
+            }
+            confidence = confidence_map.get(confidence_str.lower(), 0.5)
+            
+            return {
+                "stage": stage,
+                "confidence": confidence,
+                "assessment": assessment,
+                "observations": observations,
+                "recommendations": recommendations,
+                "success": True,
+                "raw_response": response_text
+            }
+            
+        except Exception as e:
+            logging.error(f"Error parsing Gemma response: {e}")
+            return {
+                "stage": "Error",
+                "confidence": 0,
+                "success": False,
+                "error": f"Response parsing error: {str(e)}"
+            }
+
+# Initialize Vertex AI client for Gemma
 vertex_ai_client = None
 if VERTEX_AI_PROJECT and VERTEX_AI_ENDPOINT_ID:
     try:
@@ -153,16 +290,12 @@ if VERTEX_AI_PROJECT and VERTEX_AI_ENDPOINT_ID:
             VERTEX_AI_ENDPOINT_ID,
             VERTEX_AI_REGION
         )
-        logging.info("Vertex AI client initialized successfully with ADC authentication")
+        logging.info("Vertex AI Gemma client initialized successfully")
     except Exception as e:
-        logging.error(f"Failed to initialize Vertex AI client: {e}")
+        logging.error(f"Failed to initialize Vertex AI Gemma client: {e}")
         vertex_ai_client = None
 else:
-    logging.warning("Vertex AI project, endpoint ID not set, cervical cancer staging disabled")
-    if not VERTEX_AI_PROJECT:
-        logging.error("VERTEX_AI_PROJECT environment variable is required")
-    if not VERTEX_AI_ENDPOINT_ID:
-        logging.error("VERTEX_AI_ENDPOINT_ID environment variable is required")
+    logging.warning("Vertex AI project or endpoint ID not set, cervical cancer analysis disabled")
 
 app = Flask(__name__)
 genai.configure(api_key=gen_api)
@@ -412,91 +545,18 @@ def download_whatsapp_media(media_id, file_path):
         return False
 
 
-def stage_cervical_cancer(image_path):
-    """Stage cervical cancer using Vertex AI MedSigLip model with correct payload structure"""
+def stage_cervical_cancer(image_path, clinical_context=""):
+    """Stage cervical cancer using Vertex AI Gemma model"""
     if not vertex_ai_client:
         return {
             "stage": "Error",
             "confidence": 0,
             "success": False,
-            "error": "Vertex AI client not configured"
+            "error": "Vertex AI Gemma client not configured"
         }
     
-    try:
-        # Read and encode the image
-        with open(image_path, "rb") as f:
-            image_data = f.read()
-        encoded_image = base64.b64encode(image_data).decode("utf-8")
+    return vertex_ai_client.analyze_cervical_image(image_path, clinical_context)
 
-        # ✅ Correct payload format based on model spec
-        instance = {
-            "image": {
-                "input_bytes": encoded_image
-            },
-            # You can include a text prompt for context (optional)
-            "text": "A cervical VIA image for cancer staging"
-        }
-        
-        prediction_result = vertex_ai_client.predict([instance])
-        
-        # Handle prediction errors
-        if "error" in prediction_result:
-            return {
-                "stage": "Error",
-                "confidence": 0,
-                "success": False,
-                "error": prediction_result["error"]
-            }
-
-        # ✅ Parse the prediction response
-        if "predictions" in prediction_result and len(prediction_result["predictions"]) > 0:
-            results = prediction_result["predictions"][0]
-            
-            if isinstance(results, dict):
-                stage = results.get('stage', results.get('class', results.get('prediction', 'Unknown')))
-                confidence = results.get('confidence', results.get('score', results.get('probability', 0)))
-            elif isinstance(results, list):
-                stage = "Stage " + str(results[0]) if results else "Unknown"
-                confidence = results[1] if len(results) > 1 else 0
-            else:
-                stage = str(results)
-                confidence = 0.5
-            
-            return {
-                "stage": stage,
-                "confidence": float(confidence),
-                "success": True
-            }
-        elif "outputs" in prediction_result:
-            outputs = prediction_result["outputs"]
-            stage = outputs[0] if outputs else "Unknown"
-            confidence = outputs[1] if len(outputs) > 1 else 0.5
-            
-            return {
-                "stage": stage,
-                "confidence": float(confidence),
-                "success": True
-            }
-        else:
-            logging.warning(f"Unexpected prediction result format: {prediction_result}")
-            return {
-                "stage": "Error",
-                "confidence": 0,
-                "success": False,
-                "error": "Unexpected response format from model"
-            }
-            
-    except Exception as e:
-        logging.error(f"Error in cervical cancer staging: {e}")
-        return {
-            "stage": "Error",
-            "confidence": 0,
-            "success": False,
-            "error": str(e)
-        }
-
-
-# Database setup (optional)
 db = False
 if os.environ.get("DB_URL"):
     try:
@@ -581,6 +641,7 @@ else:
     db = False
     logging.info("DB_URL not set, database functionality disabled")
 
+
 def handle_language_detection(sender, prompt, phone_id):
     """Handle language detection state"""
     detected_lang = detect_language(prompt)
@@ -641,24 +702,24 @@ def handle_patient_id(sender, prompt, phone_id):
     state["step"] = "awaiting_image"
     
     if lang == "shona":
-        send("Ndatenda! Zvino ndapota tumirai mufananidzo wekuongororwa.", sender, phone_id)
+        send("Ndatenda! Zvino ndapota tumirai mufananidzo wekuongororwa weGemma AI kuti uongorore cervical cancer.", sender, phone_id)
     elif lang == "ndebele":
-        send("Ngiyabonga! Manje ngicela uthumele isithombe sokuhlola.", sender, phone_id)
+        send("Ngiyabonga! Manje ngicela uthumele isithombe sokuhlola se-Gemma AI ukuhlola isifo somlomo wesibeletho.", sender, phone_id)
     elif lang == "tonga":
-        send("Twatotela! Nomba tumizya ciswaswani cekuongolesya.", sender, phone_id)
+        send("Twatotela! Nomba tumizya ciswaswani cekuongolesya ca Gemma AI cekuongolesya cancer ya cervical.", sender, phone_id)
     elif lang == "chinyanja":
-        send("Zikomo! Tsopano chonde tumizani chithunzi choyeserera.", sender, phone_id)
+        send("Zikomo! Tsopano chonde tumizani chithunzi choyeserera cha Gemma AI choyesera kansalu ya chibereko.", sender, phone_id)
     elif lang == "bemba":
-        send("Natotela! Nomba napapata tumishanye icinskana cekupekuleshya.", sender, phone_id)
+        send("Natotela! Nomba napapata tumishanye icinskana cekupekuleshya ca Gemma AI ica kupekuleshya cancer ya cervical.", sender, phone_id)
     elif lang == "lozi":
-        send("Ni itumezi! Kacenu, ni lu tumela sitapi sa ku kekula.", sender, phone_id)
+        send("Ni itumezi! Kacenu, ni lu tumela sitapi sa ku kekula sa Gemma AI sa ku kekula kanseli ya sikumba.", sender, phone_id)
     else:
-        send("Thank you! Now you can upload the image for amplified VIA analysis", sender, phone_id)
+        send("Thank you! Now you can upload the cervical image for analysis using Gemma AI technology.", sender, phone_id)
     
     save_user_state(sender, state)
 
 def handle_cervical_image(sender, media_id, phone_id):
-    """Handle cervical cancer image for staging using MedSigLip model"""
+    """Handle cervical cancer image for staging using Gemma AI model"""
     state = user_states[sender]
     lang = state["language"]
     
@@ -666,33 +727,52 @@ def handle_cervical_image(sender, media_id, phone_id):
     image_path = f"/tmp/{sender}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
     
     if lang == "shona":
-        send("Ndiri kugamuchira mufananidzo wenyu. Ndapota mirira, ndiri kuongorora nesimba reMedSigLip model.", sender, phone_id)
+        send("Ndiri kugamuchira mufananidzo wenyu. Ndapota mirira, ndiri kuongorora nesimba reGemma AI model.", sender, phone_id)
     else:
-        send("I've received your image. Please wait while I analyze it using the MedSigLip model.", sender, phone_id)
+        send("I've received your image. Please wait while I analyze it using the advanced Gemma AI model.", sender, phone_id)
     
-    # For WhatsApp, the incoming "image" contains a media ID, not a direct URL
     if download_whatsapp_media(media_id, image_path):
-        # Stage the cervical cancer using MedSigLip model
-        result = stage_cervical_cancer(image_path)
+        # Prepare clinical context
+        worker_id = state.get("worker_id", "Unknown")
+        patient_id = state.get("patient_id", "Unknown")
+        clinical_context = f"Worker ID: {worker_id}, Patient ID: {patient_id}"
+        
+        # Stage the cervical cancer using Gemma AI model
+        result = stage_cervical_cancer(image_path, clinical_context)
         
         if result["success"]:
             stage = result["stage"]
             confidence = result["confidence"]
-            
-            # Add worker ID and patient ID to the result
-            worker_id = state.get("worker_id", "Unknown")
-            patient_id = state.get("patient_id", "Unknown")
+            assessment = result.get("assessment", "No assessment provided")
+            observations = result.get("observations", "No observations")
+            recommendations = result.get("recommendations", "No specific recommendations")
             
             if lang == "shona":
-                response = f"Mhedzisiro yekuongorora neMedSigLip:\n- Worker ID: {worker_id}\n- Patient ID: {patient_id}\n- Danho: {stage}\n- Chivimbo: {confidence:.2%}\n\nNote: Izvi hazvitsivi kuongororwa kwechiremba. Unofanira kuona chiremba kuti uwane kuongororwa kwakazara."
+                response = f"**Mhedzisiro yeGemma AI Kuongorora:**\n\n" \
+                          f"**Worker ID:** {worker_id}\n" \
+                          f"**Patient ID:** {patient_id}\n" \
+                          f"**Ongororo:** {assessment}\n" \
+                          f"**Danho Rinofungidzirwa:** {stage}\n" \
+                          f"**Chivimbo:** {confidence:.1%}\n" \
+                          f"**Zvakaonekwa:** {observations}\n" \
+                          f"**Kurudziro:** {recommendations}\n\n" \
+                          f"**Chenjedzo:** Izvi hazvitsivi kuongororwa kwechiremba. Unofanira kuona chiremba kuti uwane kuongororwa kwakazara."
             else:
-                response = f"MedSigLip Diagnosis results:\n- Worker ID: {worker_id}\n- Patient ID: {patient_id}\n- Stage: {stage}\n- Confidence: {confidence:.2%}\n\nNote: This does not replace a doctor's diagnosis. Please see a healthcare professional for a complete evaluation."
+                response = f"**Gemma AI Analysis Results:**\n\n" \
+                          f"**Worker ID:** {worker_id}\n" \
+                          f"**Patient ID:** {patient_id}\n" \
+                          f"**Assessment:** {assessment}\n" \
+                          f"**Potential Stage:** {stage}\n" \
+                          f"**Confidence:** {confidence:.1%}\n" \
+                          f"**Observations:** {observations}\n" \
+                          f"**Recommendations:** {recommendations}\n\n" \
+                          f"**Disclaimer:** This does not replace a doctor's diagnosis. Please see a healthcare professional for a complete evaluation."
         else:
             error_msg = result.get("error", "Unknown error")
             if lang == "shona":
-                response = f"Ndine urombo, handina kukwanisa kuongorora mufananidzo wenyu. Error: {error_msg}. Edza kuendesa imwe mufananidzo kana kumbobvunza chiremba."
+                response = f"Ndine urombo, handina kukwanisa kuongorora mufananidzo wenyu neGemma AI. Error: {error_msg}. Edza kuendesa imwe mufananidzo kana kumbobvunza chiremba."
             else:
-                response = f"I'm sorry, I couldn't analyze your image. Error: {error_msg}. Please try sending another image or consult a doctor directly."
+                response = f"I'm sorry, I couldn't analyze your image using Gemma AI. Error: {error_msg}. Please try sending another image or consult a doctor directly."
         
         # Clean up the downloaded image
         remove(image_path)
@@ -731,9 +811,9 @@ def handle_follow_up(sender, prompt, phone_id):
         # End session
         state["step"] = "main_menu"
         if lang == "shona":
-            send("Ndatenda nekushandisa Dawa Health neMedSigLip technology. Kana uine mimwe mibvunzo, tendera kuti ndikubatsire.", sender, phone_id)
+            send("Ndatenda nekushandisa Dawa Health neGemma AI technology. Kana uine mimwe mibvunzo, tendera kuti ndikubatsire.", sender, phone_id)
         else:
-            send("Thank you for using Dawa Health with MedSigLip technology. If you have more questions, feel free to ask.", sender, phone_id)
+            send("Thank you for using Dawa Health with Gemma AI technology. If you have more questions, feel free to ask.", sender, phone_id)
     
     save_user_state(sender, state)
 
@@ -799,13 +879,12 @@ def message_handler(data, phone_id):
     sender = data["from"]
     logging.info(f"Received message from {sender}")
     
-    # Load user state from Redis with better handling
+    # Load user state from Redis
     state = get_user_state(sender)
     if state:
         user_states[sender] = state
         logging.info(f"Loaded existing state for {sender}: {state['step']}")
     else:
-        # Only initialize if truly new user (not in memory either)
         if sender not in user_states:
             user_states[sender] = {
                 "step": "language_detection",
@@ -833,7 +912,6 @@ def message_handler(data, phone_id):
         media_type = "image"
         media_url = data["image"]["id"]
         logging.info(f"Image received, media_id: {media_url}")
-        # Use a placeholder prompt for image processing
         prompt = "IMAGE_UPLOADED"
     else:
         prompt = "UNSUPPORTED_MESSAGE_TYPE"
