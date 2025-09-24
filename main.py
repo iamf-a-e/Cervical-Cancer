@@ -88,30 +88,13 @@ MEDSIGLIP_API_KEY = os.environ.get("MEDSIGLIP_API")
 # Replaced VertexAIClient — uses ADC (Application Default Credentials)
 # --------------------------------------------------------------------------------
 class VertexAIClient:
-    def __init__(self, project_id, endpoint_id, region="us-west4"):
-        self.project_id = project_id
-        self.endpoint_id = endpoint_id
-        self.region = region
-
-        # Use Application Default Credentials (reads from GOOGLE_APPLICATION_CREDENTIALS or ADC)
-        try:
-            self.credentials, detected_project = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-            # If VERTEX_AI_PROJECT wasn't provided, use detected project
-            if not self.project_id and detected_project:
-                self.project_id = detected_project
-            # Ensure token is valid right away
-            self.credentials.refresh(Request())
-            logging.info("✅ Obtained ADC credentials for Vertex AI")
-        except Exception as e:
-            logging.error(f"❌ Failed to obtain ADC credentials: {e}")
-            raise
-
-        # Standard Vertex AI REST endpoint for predictions
-        self.endpoint_url = (
-            f"https://{region}-aiplatform.googleapis.com/v1/projects/{self.project_id}/locations/{region}/endpoints/{endpoint_id}:predict"
-        )
-
-        logging.info(f"Using Vertex AI endpoint URL: {self.endpoint_url}")
+    def __init__(self):
+        # The correct dedicated endpoint URL
+        self.base_url = "https://9216603443274186752.us-west4-519460264942.prediction.vertexai.goog"
+        self.project_id = "ninja-427218"
+        self.location = "us-west4"
+        self.endpoint_id = "9216603443274186752"
+        self.headers = self.get_auth_headers()
 
     def get_auth_header(self):
         if not self.credentials.valid:
@@ -119,29 +102,16 @@ class VertexAIClient:
         return {"Authorization": f"Bearer {self.credentials.token}"}
 
     def predict(self, instances):
-        headers = {
-            "Content-Type": "application/json",
-            **self.get_auth_header()
-        }
-
+        # Construct the URL using the dedicated base_url
+        url = f"{self.base_url}/predict"
+        
+        # Prepare the payload with the instances
         payload = {"instances": instances}
-
-        try:
-            logging.info(f"Sending prediction request to Vertex AI endpoint: {self.endpoint_url}")
-            response = requests.post(self.endpoint_url, headers=headers, json=payload, timeout=30)
-            response.raise_for_status()
-            result = response.json()
-            logging.info("Vertex AI prediction successful")
-            return result
-        except requests.exceptions.Timeout:
-            logging.error("Vertex AI request timed out")
-            return {"error": "Request timeout - please try again"}
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Vertex AI API request failed: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                logging.error(f"Response status: {e.response.status_code}")
-                logging.error(f"Response body: {e.response.text}")
-            return {"error": f"API request failed: {str(e)}"}
+        
+        # Make the API call
+        response = requests.post(url, json=payload, headers=self.headers)
+        response.raise_for_status()
+        return response.json()
 
 # Initialize Vertex AI client with ADC
 vertex_ai_client = None
