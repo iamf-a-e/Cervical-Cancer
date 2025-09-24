@@ -425,14 +425,16 @@ def stage_cervical_cancer(image_path):
         with open(image_path, "rb") as f:
             image_data = f.read()
         
-        # Prepare the prediction instance for MedSigLip model
-        # MedSigLip typically expects base64 encoded image
+        # Prepare the prediction instance with the correct key 'input_bytes'
         instance = {
-            "image_bytes": {"b64": base64.b64encode(image_data).decode('utf-8')}
+            "image": {
+                "input_bytes": base64.b64encode(image_data).decode('utf-8')
+            }
         }
         
         # Make prediction using the dedicated endpoint
         prediction_result = vertex_ai_client.predict([instance])
+        
         
         if "error" in prediction_result:
             return {
