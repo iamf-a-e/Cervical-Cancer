@@ -430,13 +430,14 @@ def stage_cervical_cancer(image_path):
             "image": {
                 "input_bytes": base64.b64encode(image_data).decode('utf-8')
             },
-            # Add a descriptive text prompt as required by the model
-            "text": "A cervical image showing possible abnormalities."
+            # Provide a list of candidate labels for zero-shot classification
+            "text": ["normal", "abnormal", "cervical cancer"]
         }
         
         # Make prediction using the dedicated endpoint
         prediction_result = vertex_ai_client.predict([instance])
-       
+        
+              
         if "error" in prediction_result:
             return {
                 "stage": "Error",
