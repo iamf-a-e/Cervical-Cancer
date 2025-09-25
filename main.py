@@ -784,9 +784,7 @@ def handle_cervical_image(sender, media_id, phone_id):
 
     # Try to download media
     if download_whatsapp_media(media_id, image_path):
-        # ✅ Only send analyzing message once we have the file
-        send(waiting_messages.get(lang, "📨 Analyzing your image..."), sender, phone_id)
-
+        
         result = stage_cervical_cancer(image_path)
 
         worker_id = state.get("worker_id", "Unknown")
