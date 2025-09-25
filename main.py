@@ -518,10 +518,13 @@ def stage_cervical_cancer(image_path):
         with open(image_path, "rb") as f:
             image_b64 = base64.b64encode(f.read()).decode("utf-8")
 
+        # ✅ CORRECTED payload format based on the error message
         payload = {
             "instances": [
                 {
-                    "image_bytes": {"b64": image_b64},
+                    "image": {
+                        "input_bytes": {"b64": image_b64}
+                    },
                     "key": "prediction_key"
                 }
             ]
@@ -608,6 +611,7 @@ def stage_cervical_cancer(image_path):
             }
 
     except Exception as e:
+        import traceback  # ✅ Add missing import
         logging.error(f"❌ Staging error: {e}")
         logging.error(f"❌ Stack trace: {traceback.format_exc()}")
         return {
@@ -616,7 +620,7 @@ def stage_cervical_cancer(image_path):
             "success": False,
             "error": str(e)
         }
-
+        
 
 # Database setup (optional)
 db = False
