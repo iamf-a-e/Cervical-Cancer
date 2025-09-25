@@ -772,37 +772,46 @@ def handle_cervical_image(sender, media_id, phone_id):
     state = user_states[sender]
     lang = state["language"]
 
-    # File path for the incoming image
-    image_path = f"/tmp/{sender}_{int(time.time())}.jpg"
+    # ✅ Check if we're already processing an image for this user
+    if state.get("processing_image"):
+        print(f"⚠️ Already processing image for {sender}, skipping duplicate")
+        return
+    
+    # ✅ Set processing flag to prevent duplicate processing
+    state["processing_image"] = True
+    save_user_state(sender, state)  # Save immediately to persist the flag
 
-    # Localized "analyzing" message
-    waiting_messages = {
-        "shona": "📨 Ndiri kuongorora mufananidzo wenyu...",
-        "ndebele": "📨 Ngiyahlola isithombe sakho...", 
-        "english": "📨 Analyzing your image..."
-    }
+    try:
+        # File path for the incoming image
+        image_path = f"/tmp/{sender}_{int(time.time())}.jpg"
 
-    # Try to download media
-    if download_whatsapp_media(media_id, image_path):
-        # ✅ Only send analyzing message once we have the file
-        # FIX: Select the message based on language
-        waiting_message = waiting_messages.get(lang, waiting_messages["english"])
-        send(waiting_message, sender, phone_id)
+        # Localized "analyzing" message
+        waiting_messages = {
+            "shona": "📨 Ndiri kuongorora mufananidzo wenyu...",
+            "ndebele": "📨 Ngiyahlola isithombe sakho...", 
+            "english": "📨 Analyzing your image..."
+        }
 
-        result = stage_cervical_cancer(image_path)
+        # Try to download media
+        if download_whatsapp_media(media_id, image_path):
+            # ✅ Only send analyzing message once we have the file
+            waiting_message = waiting_messages.get(lang, waiting_messages["english"])
+            send(waiting_message, sender, phone_id)
 
-        worker_id = state.get("worker_id", "Unknown")
-        patient_id = state.get("patient_id", "Unknown")
+            result = stage_cervical_cancer(image_path)
 
-        if result["success"]:
-            stage = result["stage"]
-            confidence = result["confidence"]
-            response_type = result.get("response_type", "unknown")
+            worker_id = state.get("worker_id", "Unknown")
+            patient_id = state.get("patient_id", "Unknown")
 
-            # Classification results
-            if response_type == "classification":
-                if lang == "shona":
-                    response = f"""🔬 MedSigLip Ongororo:
+            if result["success"]:
+                stage = result["stage"]
+                confidence = result["confidence"]
+                response_type = result.get("response_type", "unknown")
+
+                # Classification results
+                if response_type == "classification":
+                    if lang == "shona":
+                        response = f"""🔬 MedSigLip Ongororo:
 
 📋 Worker ID: {worker_id}
 👤 Patient ID: {patient_id}
@@ -810,8 +819,8 @@ def handle_cervical_image(sender, media_id, phone_id):
 ✅ Chivimbo: {confidence:.1%}
 
 💡 Ziva: Izvi hazvitsivi kuongororwa kwechiremba."""
-                elif lang == "ndebele":
-                    response = f"""🔬 Imiphumela yeMedSigLip:
+                    elif lang == "ndebele":
+                        response = f"""🔬 Imiphumela yeMedSigLip:
 
 📋 I-Worker ID: {worker_id}
 👤 I-Patient ID: {patient_id}
@@ -819,8 +828,8 @@ def handle_cervical_image(sender, media_id, phone_id):
 ✅ Ukuthemba: {confidence:.1%}
 
 💡 Qaphela: Lokhu akufaki esikhundleni sokuhlolwa kadokotela."""
-                else:
-                    response = f"""🔬 MedSigLip Analysis Results:
+                    else:
+                        response = f"""🔬 MedSigLip Analysis Results:
 
 📋 Worker ID: {worker_id}
 👤 Patient ID: {patient_id}
@@ -828,12 +837,12 @@ def handle_cervical_image(sender, media_id, phone_id):
 ✅ Confidence: {confidence:.1%}
 
 💡 Note: This does not replace a doctor's diagnosis."""
-            
-            # Embedding-based fallback
-            elif response_type == "embedding_fallback":
-                note = result.get("note", "")
-                if lang == "shona":
-                    response = f"""🔬 Ongororo Yakaitwa:
+                
+                # Embedding-based fallback
+                elif response_type == "embedding_fallback":
+                    note = result.get("note", "")
+                    if lang == "shona":
+                        response = f"""🔬 Ongororo Yakaitwa:
 
 📋 Worker ID: {worker_id}
 👤 Patient ID: {patient_id}
@@ -841,8 +850,8 @@ def handle_cervical_image(sender, media_id, phone_id):
 ✅ Chivimbo: {confidence:.1%}
 
 💡 {note}"""
-                else:
-                    response = f"""🔬 Feature Analysis Results:
+                    else:
+                        response = f"""🔬 Feature Analysis Results:
 
 📋 Worker ID: {worker_id}
 👤 Patient ID: {patient_id}
@@ -850,70 +859,84 @@ def handle_cervical_image(sender, media_id, phone_id):
 ✅ Confidence: {confidence:.1%}
 
 💡 {note}"""
-            else:
-                # Unknown format
-                if lang == "shona":
-                    response = f"""🔬 Mufananidzo Wagamuchirwa:
+                else:
+                    # Unknown format
+                    if lang == "shona":
+                        response = f"""🔬 Mufananidzo Wagamuchirwa:
 
 📋 Worker ID: {worker_id}
 👤 Patient ID: {patient_id}
 🏥 Zvakaonekwa: Mufananidzo wakaongororwa zvakanaka
 
 💡 Chiremba achakupa mhedzisiro chaiyo."""
-                else:
-                    response = f"""🔬 Image Analysis Complete:
+                    else:
+                        response = f"""🔬 Image Analysis Complete:
 
 📋 Worker ID: {worker_id}
 👤 Patient ID: {patient_id}
 🏥 Status: Image processed successfully
 
 💡 Doctor will provide detailed interpretation."""
-        else:
-            # ❌ Analysis error
-            error_msg = result.get("error", "Unknown error")
-            if lang == "shona":
-                response = f"""❌ Hatina kukwanisa kuongorora mufananidzo:
+            else:
+                # ❌ Analysis error
+                error_msg = result.get("error", "Unknown error")
+                if lang == "shona":
+                    response = f"""❌ Hatina kukwanisa kuongorora mufananidzo:
 
 Tsaona: {error_msg}
 
 💡 Edza kuendesa imwe mufananidzo kana kumbobvunza chiremba."""
-            else:
-                response = f"""❌ Analysis failed:
+                else:
+                    response = f"""❌ Analysis failed:
 
 Error: {error_msg}
 
 💡 Please try another image or consult a doctor."""
 
-        # Cleanup temp image
-        try:
-            os.remove(image_path)
-        except:
-            pass
+            # Cleanup temp image
+            try:
+                os.remove(image_path)
+            except:
+                pass
 
-        send(response, sender, phone_id)
+            send(response, sender, phone_id)
 
-    else:
-        # ❌ Download failed
-        if lang == "shona":
-            send("❌ Hatina kukwanisa kugamuchira mufananidzo. Edza zvakare.", sender, phone_id)
-        elif lang == "ndebele":
-            send("❌ Asikwazanga ukulanda isithombe. Zama futhi.", sender, phone_id)
         else:
-            send("❌ Could not download image. Please try again.", sender, phone_id)
+            # ❌ Download failed
+            if lang == "shona":
+                send("❌ Hatina kukwanisa kugamuchira mufananidzo. Edza zvakare.", sender, phone_id)
+            elif lang == "ndebele":
+                send("❌ Asikwazanga ukulanda isithombe. Zama futhi.", sender, phone_id)
+            else:
+                send("❌ Could not download image. Please try again.", sender, phone_id)
 
-    # 🔄 Always advance to follow_up, success or failure
-    state["step"] = "follow_up"
-    questions = {
-        "shona": "Unoda kuendesa imwe mufananidzo here? (Ehe/Aihwa)",
-        "ndebele": "Uyafuna ukuthumela esinye isithombe? (Yebo/Cha)", 
-        "english": "Would you like to submit another image? (Yes/No)"
-    }
-    
-    # FIX: Select the question based on language
-    question = questions.get(lang, questions["english"])
-    send(question, sender, phone_id)
+        # 🔄 Always advance to follow_up, success or failure
+        state["step"] = "follow_up"
+        questions = {
+            "shona": "Unoda kuendesa imwe mufananidzo here? (Ehe/Aihwa)",
+            "ndebele": "Uyafuna ukuthumela esinye isithombe? (Yebo/Cha)", 
+            "english": "Would you like to submit another image? (Yes/No)"
+        }
+        
+        # FIX: Select the question based on language
+        question = questions.get(lang, questions["english"])
+        send(question, sender, phone_id)
 
-    save_user_state(sender, state)
+    except Exception as e:
+        # ✅ Handle any unexpected errors
+        print(f"❌ Error in handle_cervical_image for {sender}: {e}")
+        error_msg = "An error occurred during processing. Please try again."
+        if lang == "shona":
+            error_msg = "Paine dambudziko pakuongorora mufananidzo. Edza zvakare."
+        elif lang == "ndebele":
+            error_msg = "Kube nephutha ekucutshungeni isithombe. Zama futhi."
+        
+        send(f"❌ {error_msg}", sender, phone_id)
+        
+    finally:
+        # ✅ Always clear the processing flag, even if there's an error
+        state["processing_image"] = False
+        save_user_state(sender, state)
 
 
 def handle_follow_up(sender, prompt, phone_id):
