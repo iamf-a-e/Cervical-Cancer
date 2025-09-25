@@ -505,7 +505,7 @@ def download_whatsapp_media(media_id, file_path):
         return False
 
 def stage_cervical_cancer(image_path):
-    """Stage cervical cancer using Vertex AI - handle both embedding and classification outputs"""
+    """Stage cervical cancer using Vertex AI - with corrected payload format"""
     if not vertex_ai_client:
         return {
             "stage": "Error",
@@ -518,11 +518,14 @@ def stage_cervical_cancer(image_path):
         with open(image_path, "rb") as f:
             image_b64 = base64.b64encode(f.read()).decode("utf-8")
 
+        # ✅ CORRECTED PAYLOAD FORMAT
         payload = {
             "instances": [
                 {
-                    "image_bytes": {"b64": image_b64},
-                    "key": "prediction_key"
+                    "image": {
+                        "input_bytes": image_b64  # Use 'input_bytes' under 'image'
+                    }
+                    # Remove the 'key' field as it's not in the schema
                 }
             ]
         }
@@ -531,12 +534,12 @@ def stage_cervical_cancer(image_path):
         result = vertex_ai_client.predict(payload)
         logging.info(f"🔬 Raw Vertex AI response: {json.dumps(result, indent=2)[:1000]}...")
         
+        # Rest of your existing response handling code remains the same...
         if "predictions" in result and result["predictions"]:
             prediction = result["predictions"][0]
             
-            # Handle classification output (expected format)
+            # Handle classification output
             if isinstance(prediction, dict):
-                # Case 1: Standard classification output
                 if "displayNames" in prediction and "confidences" in prediction:
                     labels = prediction["displayNames"]
                     scores = prediction["confidences"]
