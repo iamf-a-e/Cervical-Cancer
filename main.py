@@ -785,7 +785,9 @@ def handle_cervical_image(sender, media_id, phone_id):
     # Try to download media
     if download_whatsapp_media(media_id, image_path):
         # ✅ Only send analyzing message once we have the file
-        send(waiting_messages, sender, phone_id)
+        # FIX: Select the message based on language
+        waiting_message = waiting_messages.get(lang, waiting_messages["english"])
+        send(waiting_message, sender, phone_id)
 
         result = stage_cervical_cancer(image_path)
 
@@ -906,7 +908,10 @@ Error: {error_msg}
         "ndebele": "Uyafuna ukuthumela esinye isithombe? (Yebo/Cha)", 
         "english": "Would you like to submit another image? (Yes/No)"
     }
-    send(questions.get(lang, questions["english"]), sender, phone_id)
+    
+    # FIX: Select the question based on language
+    question = questions.get(lang, questions["english"])
+    send(question, sender, phone_id)
 
     save_user_state(sender, state)
 
