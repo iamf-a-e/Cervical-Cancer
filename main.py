@@ -518,13 +518,10 @@ def stage_cervical_cancer(image_path):
         with open(image_path, "rb") as f:
             image_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-        # ✅ CORRECTED payload format based on the error message
         payload = {
             "instances": [
                 {
-                    "image": {
-                        "input_bytes": {"b64": image_b64}
-                    },
+                    "image_bytes": {"b64": image_b64},
                     "key": "prediction_key"
                 }
             ]
@@ -611,7 +608,6 @@ def stage_cervical_cancer(image_path):
             }
 
     except Exception as e:
-        import traceback  # ✅ Add missing import
         logging.error(f"❌ Staging error: {e}")
         logging.error(f"❌ Stack trace: {traceback.format_exc()}")
         return {
@@ -620,7 +616,7 @@ def stage_cervical_cancer(image_path):
             "success": False,
             "error": str(e)
         }
-        
+
 
 # Database setup (optional)
 db = False
@@ -779,15 +775,17 @@ def handle_cervical_image(sender, media_id, phone_id):
     # File path for the incoming image
     image_path = f"/tmp/{sender}_{int(time.time())}.jpg"
 
-    # Try to download media first
+    # Localized "analyzing" message
+    waiting_messages = {
+        "shona": "📨 Ndiri kuongorora mufananidzo wenyu...",
+        "ndebele": "📨 Ngiyahlola isithombe sakho...", 
+        "english": "📨 Analyzing your image..."
+    }
+
+    # Try to download media
     if download_whatsapp_media(media_id, image_path):
-        # ✅ Send analyzing message ONLY if download was successful
-        waiting_messages = {
-            "shona": "📨 Ndiri kuongorora mufananidzo wenyu...",
-            "ndebele": "📨 Ngiyahlola isithombe sakho...", 
-            "english": "📨 Analyzing your image..."
-        }
-        send(waiting_messages.get(lang, "📨 Analyzing your image..."), sender, phone_id)
+        # ✅ Only send analyzing message once we have the file
+        send(waiting_messages, sender, phone_id)
 
         result = stage_cervical_cancer(image_path)
 
@@ -893,7 +891,7 @@ Error: {error_msg}
         send(response, sender, phone_id)
 
     else:
-        # ❌ Download failed - send error message only
+        # ❌ Download failed
         if lang == "shona":
             send("❌ Hatina kukwanisa kugamuchira mufananidzo. Edza zvakare.", sender, phone_id)
         elif lang == "ndebele":
@@ -911,6 +909,7 @@ Error: {error_msg}
     send(questions.get(lang, questions["english"]), sender, phone_id)
 
     save_user_state(sender, state)
+
 
 def handle_follow_up(sender, prompt, phone_id):
     """Handle follow-up after diagnosis"""
