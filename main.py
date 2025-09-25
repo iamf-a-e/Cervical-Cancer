@@ -775,16 +775,14 @@ def handle_cervical_image(sender, media_id, phone_id):
     # File path for the incoming image
     image_path = f"/tmp/{sender}_{int(time.time())}.jpg"
 
-    # Localized "analyzing" message
-    waiting_messages = {
-        "shona": "📨 Ndiri kuongorora mufananidzo wenyu...",
-        "ndebele": "📨 Ngiyahlola isithombe sakho...", 
-        "english": "📨 Analyzing your image..."
-    }
-
-    # Try to download media
+    # Try to download media first
     if download_whatsapp_media(media_id, image_path):
-        # ✅ Only send analyzing message once we have the file
+        # ✅ Send analyzing message ONLY if download was successful
+        waiting_messages = {
+            "shona": "📨 Ndiri kuongorora mufananidzo wenyu...",
+            "ndebele": "📨 Ngiyahlola isithombe sakho...", 
+            "english": "📨 Analyzing your image..."
+        }
         send(waiting_messages.get(lang, "📨 Analyzing your image..."), sender, phone_id)
 
         result = stage_cervical_cancer(image_path)
@@ -891,7 +889,7 @@ Error: {error_msg}
         send(response, sender, phone_id)
 
     else:
-        # ❌ Download failed
+        # ❌ Download failed - send error message only
         if lang == "shona":
             send("❌ Hatina kukwanisa kugamuchira mufananidzo. Edza zvakare.", sender, phone_id)
         elif lang == "ndebele":
@@ -909,7 +907,6 @@ Error: {error_msg}
     send(questions.get(lang, questions["english"]), sender, phone_id)
 
     save_user_state(sender, state)
-
 
 def handle_follow_up(sender, prompt, phone_id):
     """Handle follow-up after diagnosis"""
