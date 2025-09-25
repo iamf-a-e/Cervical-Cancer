@@ -569,13 +569,14 @@ def stage_cervical_cancer(image_path):
             if "embedding" in prediction:
                 embedding = prediction["embedding"]
                 logging.warning("⚠️ Received embedding instead of classification. Endpoint may be misconfigured.")
-                
-                # Simple heuristic: if embedding has high variance, might indicate abnormality
-                # This is a basic fallback - you should use a proper classifier
-                import numpy as np
-                embedding_array = np.array(embedding)
-                variance = np.var(embedding_array)
-                
+            
+                # Compute variance manually (to avoid numpy dependency)
+                if len(embedding) > 1:
+                    mean = sum(embedding) / len(embedding)
+                    variance = sum((x - mean) ** 2 for x in embedding) / (len(embedding) - 1)
+                else:
+                    variance = 0.0
+            
                 # Very basic classification based on embedding characteristics
                 if variance > 0.01:  # Adjust this threshold based on your data
                     stage = "Suspicious - Further evaluation needed"
@@ -583,7 +584,7 @@ def stage_cervical_cancer(image_path):
                 else:
                     stage = "Normal - No significant abnormalities detected"
                     confidence = 0.7
-                
+            
                 return {
                     "stage": stage,
                     "confidence": float(confidence),
@@ -591,6 +592,7 @@ def stage_cervical_cancer(image_path):
                     "response_type": "embedding_fallback",
                     "note": "Analysis based on image features. Clinical evaluation required."
                 }
+
             
             # Case 4: Unknown format - return raw prediction
             logging.warning(f"⚠️ Unknown prediction format: {type(prediction)}")
