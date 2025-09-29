@@ -532,11 +532,8 @@ def stage_cervical_cancer(image_path):
 
         logging.info("Sending image to Vertex AI for analysis...")
         result = vertex_ai_client.predict(payload)
-        try:
-            logging.info(f"📥 Full Vertex AI response: {json.dumps(result, indent=2)}")
-        except Exception as e:
-            logging.warning(f"⚠️ Could not JSON-dump Vertex AI response: {e}. Raw: {result}")
-        #logging.info(f"Raw Vertex AI response: {json.dumps(result, indent=2)[:1000]}...")
+
+        logging.info(f"Raw Vertex AI response: {json.dumps(result, indent=2)[:1000]}...")
         
         # Rest of your existing response handling code remains the same...
         if "predictions" in result and result["predictions"]:
