@@ -530,9 +530,10 @@ def stage_cervical_cancer(image_path):
             ]
         }
 
-        logging.info("🔬 Sending image to Vertex AI for analysis...")
+        logging.info("Sending image to Vertex AI for analysis...")
         result = vertex_ai_client.predict(payload)
-        logging.info(f"🔬 Raw Vertex AI response: {json.dumps(result, indent=2)[:1000]}...")
+        logging.info(f" Full Vertex AI response: {json.dumps(result, indent=2)}")
+        #logging.info(f"Raw Vertex AI response: {json.dumps(result, indent=2)[:1000]}...")
         
         # Rest of your existing response handling code remains the same...
         if "predictions" in result and result["predictions"]:
