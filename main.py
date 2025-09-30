@@ -22,24 +22,12 @@ import google.auth
 from google.auth.transport.requests import Request
 import urllib.parse
 import threading
+import io
+from PIL import Image
+import torch
+from transformers import AutoImageProcessor, AutoModelForImageClassification
 
 logging.basicConfig(level=logging.INFO)
-
-# --------------------------------------------------------------------------------
-# ✅ Decode Base64 service account JSON (Option A) and set GOOGLE_APPLICATION_CREDENTIALS
-# --------------------------------------------------------------------------------
-service_account_b64 = os.environ.get("GCP_SERVICE_ACCOUNT_BASE64")
-if service_account_b64:
-    sa_path = "/tmp/service-account.json"
-    try:
-        with open(sa_path, "wb") as f:
-            f.write(base64.b64decode(service_account_b64))
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = sa_path
-        logging.info(f"✅ Service account JSON written to {sa_path}")
-    except Exception as e:
-        logging.error(f"❌ Failed to decode service account JSON: {e}")
-else:
-    logging.warning("⚠️ GCP_SERVICE_ACCOUNT_BASE64 not set. Vertex AI may fail to authenticate.")
 
 # --------------------------------------------------------------------------------
 # ✅ Improved Redis Connection for Upstash
@@ -53,37 +41,22 @@ def setup_redis_connection():
         try:
             # Method 1: Try direct Upstash connection first
             if 'upstash.io' in redis_url:
-                # Upstash provides a REST API-like URL, convert it
-                if redis_url.startswith('https://'):
-                    # Extract host from Upstash URL
-                    parsed = urllib.parse.urlparse(redis_url)
-                    host = parsed.hostname
-                    port = 6379  # Default Redis port
-                    
-                    redis_client = redis.Redis(
-                        host=host,
-                        port=port,
-                        password=redis_token,
-                        ssl=True,
-                        ssl_cert_reqs=None,  # Important for Upstash
-                        decode_responses=True,
-                        socket_connect_timeout=10,
-                        socket_timeout=10,
-                        retry_on_timeout=True
-                    )
-                else:
-                    # Try with rediss:// scheme
-                    formatted_url = redis_url
-                    if not formatted_url.startswith(('redis://', 'rediss://')):
-                        formatted_url = f"rediss://{redis_token}@{redis_url}:6379"
-                    
-                    redis_client = redis.from_url(
-                        formatted_url,
-                        decode_responses=True,
-                        socket_connect_timeout=10,
-                        socket_timeout=10,
-                        retry_on_timeout=True
-                    )
+                # Extract host from Upstash URL
+                parsed = urllib.parse.urlparse(redis_url)
+                host = parsed.hostname
+                port = 6379  # Default Redis port
+                
+                redis_client = redis.Redis(
+                    host=host,
+                    port=port,
+                    password=redis_token,
+                    ssl=True,
+                    ssl_cert_reqs=None,
+                    decode_responses=True,
+                    socket_connect_timeout=10,
+                    socket_timeout=10,
+                    retry_on_timeout=True
+                )
             else:
                 # Standard Redis URL
                 redis_client = redis.from_url(
@@ -103,30 +76,6 @@ def setup_redis_connection():
             
         except Exception as e:
             logging.error(f"❌ Failed to connect to Upstash Redis: {e}")
-            
-            # Method 2: Fallback to basic connection
-            try:
-                logging.info("🔄 Trying alternative Redis connection method...")
-                if 'upstash.io' in redis_url:
-                    parsed = urllib.parse.urlparse(redis_url)
-                    host = parsed.hostname
-                    
-                    redis_client = redis.Redis(
-                        host=host,
-                        port=6379,
-                        password=redis_token,
-                        ssl=True,
-                        ssl_cert_reqs=None,
-                        decode_responses=True,
-                        socket_connect_timeout=10,
-                        socket_timeout=10
-                    )
-                    redis_client.ping()
-                    logging.info("✅ Connected using alternative method")
-                    return redis_client
-            except Exception as e2:
-                logging.error(f"❌ Alternative connection also failed: {e2}")
-    
     logging.warning("⚠️ Redis functionality disabled")
     return None
 
@@ -144,75 +93,142 @@ name = "Fae"  # The bot will consider this person as its owner or creator
 bot_name = "Rudo"  # This will be the name of your bot, eg: "Hello I am Astro Bot"
 AGENT = "+263719835124"  # Fixed: added quotes to make it a string
 
-# Vertex AI Endpoint Configuration (kept from original)
-VERTEX_AI_ENDPOINT_ID = "9216603443274186752"
-VERTEX_AI_REGION = "us-west4"
-VERTEX_AI_PROJECT = os.environ.get("VERTEX_AI_PROJECT")
-# MEDSIGLIP_API_KEY is no longer used for Vertex AI authentication (ADC is used instead)
-MEDSIGLIP_API_KEY = os.environ.get("MEDSIGLIP_API")
+# Hugging Face Configuration
+HF_MODEL_NAME = os.environ.get("HF_MODEL_NAME", "microsoft/resnet-50")
+HF_API_TOKEN = os.environ.get("HF_API_TOKEN")
+# Use Hugging Face Inference API or local model
+HF_USE_INFERENCE_API = os.environ.get("HF_USE_INFERENCE_API", "false").lower() == "true"
 
 # --------------------------------------------------------------------------------
-# ✅ CORRECTED VertexAIClient — uses ADC (Application Default Credentials)
+# ✅ Hugging Face Model Client
 # --------------------------------------------------------------------------------
 
-class VertexAIClient:
-    def __init__(self, project_id, endpoint_id, location="us-west4"):
-        self.project_id = project_id
-        self.endpoint_id = endpoint_id
-        self.location = location
-
-        # Build the correct endpoint base URL
-        self.base_url = (
-            f"https://{endpoint_id}.{location}-519460264942.prediction.vertexai.goog/v1/projects/"
-            f"{project_id}/locations/{location}/endpoints/{endpoint_id}:predict"
-        )
-
-        # Get default ADC credentials
-        self.credentials, _ = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-        if not self.credentials.valid:
-            self.credentials.refresh(Request())
-
-    def get_auth_header(self):
-        if not self.credentials.valid:
-            self.credentials.refresh(Request())
-        return {"Authorization": f"Bearer {self.credentials.token}"}
-
-    def predict(self, payload):
-        headers = self.get_auth_header()
-        headers["Content-Type"] = "application/json"
-    
-        try:
-            response = requests.post(
-                self.base_url, json=payload, headers=headers, timeout=60
-            )
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.HTTPError as http_err:
-            # Log full error response for debugging
+class HuggingFaceClient:
+    def __init__(self, model_name=HF_MODEL_NAME, use_inference_api=HF_USE_INFERENCE_API, api_token=HF_API_TOKEN):
+        self.model_name = model_name
+        self.use_inference_api = use_inference_api
+        self.api_token = api_token
+        self.processor = None
+        self.model = None
+        
+        if not self.use_inference_api:
+            # Load model locally
             try:
-                error_text = response.text
-            except Exception:
-                error_text = str(http_err)
-            logging.error(f"Vertex AI HTTP error: {http_err} | Response: {error_text}")
-            raise
+                logging.info(f"🔄 Loading Hugging Face model locally: {model_name}")
+                self.processor = AutoImageProcessor.from_pretrained(model_name)
+                self.model = AutoModelForImageClassification.from_pretrained(model_name)
+                logging.info("✅ Hugging Face model loaded successfully")
+            except Exception as e:
+                logging.error(f"❌ Failed to load Hugging Face model: {e}")
+                raise
+        else:
+            logging.info("🔗 Using Hugging Face Inference API")
+
+    def predict(self, image_path):
+        """Predict using either local model or Inference API"""
+        try:
+            if self.use_inference_api:
+                return self._predict_inference_api(image_path)
+            else:
+                return self._predict_local(image_path)
         except Exception as e:
-            logging.error(f"Vertex AI request failed: {e}")
+            logging.error(f"❌ Prediction error: {e}")
             raise
 
-vertex_ai_client = None
-if VERTEX_AI_PROJECT and VERTEX_AI_ENDPOINT_ID:
-    try:
-        vertex_ai_client = VertexAIClient(
-            VERTEX_AI_PROJECT,
-            VERTEX_AI_ENDPOINT_ID,
-            VERTEX_AI_REGION
-        )
-        logging.info("✅ Vertex AI client initialized successfully with ADC authentication")
-    except Exception as e:
-        logging.error(f"❌ Failed to initialize Vertex AI client: {e}")
-        vertex_ai_client = None
-else:
-    logging.warning("⚠️ Vertex AI project, endpoint ID not set, cervical cancer staging disabled")
+    def _predict_local(self, image_path):
+        """Predict using locally loaded model"""
+        if not self.model or not self.processor:
+            raise ValueError("Model not loaded locally")
+            
+        # Load and preprocess image
+        image = Image.open(image_path).convert('RGB')
+        
+        # Preprocess image
+        inputs = self.processor(image, return_tensors="pt")
+        
+        # Run inference
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            predictions = outputs.logits.softmax(dim=-1)
+            
+        # Get top prediction
+        probs, indices = torch.topk(predictions, k=3)
+        
+        # Convert to readable results
+        results = []
+        for i in range(len(indices[0])):
+            label = self.model.config.id2label[indices[0][i].item()]
+            confidence = probs[0][i].item()
+            results.append({
+                "label": label,
+                "confidence": confidence
+            })
+        
+        return {
+            "success": True,
+            "predictions": results,
+            "top_prediction": results[0] if results else None,
+            "response_type": "classification"
+        }
+
+    def _predict_inference_api(self, image_path):
+        """Predict using Hugging Face Inference API"""
+        if not self.api_token:
+            raise ValueError("Hugging Face API token required for Inference API")
+            
+        # Read and encode image
+        with open(image_path, "rb") as f:
+            image_data = base64.b64encode(f.read()).decode("utf-8")
+        
+        # API endpoint
+        api_url = f"https://api-inference.huggingface.co/models/{self.model_name}"
+        headers = {
+            "Authorization": f"Bearer {self.api_token}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "inputs": image_data
+        }
+        
+        response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+        response.raise_for_status()
+        
+        result = response.json()
+        
+        # Format response
+        if isinstance(result, list):
+            predictions = result
+        elif isinstance(result, dict) and "predictions" in result:
+            predictions = result["predictions"]
+        else:
+            predictions = [result]
+        
+        # Sort by confidence score (assuming the API returns scores)
+        sorted_predictions = sorted(predictions, key=lambda x: x.get('score', 0), reverse=True)
+        
+        formatted_results = []
+        for pred in sorted_predictions[:3]:  # Top 3
+            formatted_results.append({
+                "label": pred.get('label', 'Unknown'),
+                "confidence": pred.get('score', 0)
+            })
+        
+        return {
+            "success": True,
+            "predictions": formatted_results,
+            "top_prediction": formatted_results[0] if formatted_results else None,
+            "response_type": "classification"
+        }
+
+# Initialize Hugging Face client
+hf_client = None
+try:
+    hf_client = HuggingFaceClient()
+    logging.info("✅ Hugging Face client initialized successfully")
+except Exception as e:
+    logging.error(f"❌ Failed to initialize Hugging Face client: {e}")
+    hf_client = None
 
 # --------------------------------------------------------------------------------
 # ✅ Environment Validation
@@ -235,7 +251,7 @@ def validate_environment():
     # Check optional but important vars
     optional_vars = {
         "REDIS_URL": redis_url,
-        "VERTEX_AI_PROJECT": VERTEX_AI_PROJECT,
+        "HF_API_TOKEN": HF_API_TOKEN,
         "OWNER_PHONE": owner_phone,
     }
     
@@ -287,7 +303,6 @@ def save_user_states():
     """Save all user states to Redis"""
     if redis_client:
         try:
-            # Save each user state individually for better performance
             for sender, state in user_states.items():
                 redis_client.setex(f"user_state:{sender}", timedelta(days=30), json.dumps(state))
             logging.info(f"✅ User states saved to Redis: {len(user_states)} states")
@@ -299,7 +314,6 @@ def load_user_states():
     global user_states
     if redis_client:
         try:
-            # Get all user state keys
             keys = redis_client.keys("user_state:*")
             user_states = {}
             for key in keys:
@@ -308,7 +322,6 @@ def load_user_states():
                 if state_data:
                     try:
                         state = json.loads(state_data)
-                        # Validate state structure
                         if isinstance(state, dict) and "step" in state:
                             user_states[sender] = state
                         else:
@@ -344,7 +357,6 @@ def save_user_conversation(sender, role, message):
                 "message": message,
                 "timestamp": datetime.now().isoformat()
             })
-            # Keep only the last 100 messages to prevent excessive storage
             if len(conversation) > 100:
                 conversation = conversation[-100:]
             redis_client.setex(f"conversation:{sender}", timedelta(days=30), json.dumps(conversation))
@@ -355,13 +367,11 @@ def save_user_conversation(sender, role, message):
 def save_user_state(sender, state):
     """Save individual user state to Redis with validation and retry"""
     if not redis_client:
-        # Fallback to in-memory storage
         user_states[sender] = state
         logging.debug("💾 Redis client not available, using in-memory storage")
         return
         
     try:
-        # Validate state structure before saving
         if isinstance(state, dict) and "step" in state:
             redis_client.setex(
                 f"user_state:{sender}", 
@@ -373,7 +383,6 @@ def save_user_state(sender, state):
             logging.error(f"❌ Invalid state structure for {sender}: {state}")
     except Exception as e:
         logging.error(f"❌ Error saving user state for {sender} to Redis: {e}")
-        # Fallback to in-memory storage
         user_states[sender] = state
 
 def get_user_state(sender):
@@ -385,7 +394,6 @@ def get_user_state(sender):
         state_data = redis_client.get(f"user_state:{sender}")
         if state_data:
             state = json.loads(state_data)
-            # Validate the state structure
             if isinstance(state, dict) and "step" in state:
                 logging.debug(f"📥 Loaded state for {sender}: {state['step']}")
                 return state
@@ -440,9 +448,7 @@ def send(answer, sender, phone_id):
         logging.error(f"❌ Error sending message to {sender}: {e}")
         response = None
 
-    # Save bot response to conversation history
     save_user_conversation(sender, "bot", answer)
-
     return response
 
 def remove(*file_paths):
@@ -505,117 +511,40 @@ def download_whatsapp_media(media_id, file_path):
         return False
 
 def stage_cervical_cancer(image_path):
-    """Stage cervical cancer using Vertex AI - with corrected payload format"""
-    if not vertex_ai_client:
+    """Stage cervical cancer using Hugging Face model"""
+    if not hf_client:
         return {
             "stage": "Error",
             "confidence": 0,
             "success": False,
-            "error": "Vertex AI not configured"
+            "error": "Hugging Face model not configured"
         }
 
     try:
-        with open(image_path, "rb") as f:
-            image_b64 = base64.b64encode(f.read()).decode("utf-8")
-
-        # ✅ CORRECTED PAYLOAD FORMAT
-        payload = {
-            "instances": [
-                {
-                    "image": {
-                        "input_bytes": image_b64  # Use 'input_bytes' under 'image'
-                    }
-                    # Remove the 'key' field as it's not in the schema
-                }
-            ]
-        }
-
-        logging.info("Sending image to Vertex AI for analysis...")
-        result = vertex_ai_client.predict(payload)
-
-        logging.info(f"Raw Vertex AI response: {json.dumps(result, indent=2)[:1000]}...")
+        logging.info("Sending image to Hugging Face model for analysis...")
+        result = hf_client.predict(image_path)
         
-        # Rest of your existing response handling code remains the same...
-        if "predictions" in result and result["predictions"]:
-            prediction = result["predictions"][0]
-            
-            # Handle classification output
-            if isinstance(prediction, dict):
-                if "displayNames" in prediction and "confidences" in prediction:
-                    labels = prediction["displayNames"]
-                    scores = prediction["confidences"]
-                    if labels and scores:
-                        max_idx = scores.index(max(scores))
-                        return {
-                            "stage": labels[max_idx],
-                            "confidence": float(scores[max_idx]),
-                            "success": True,
-                            "response_type": "classification"
-                        }
-                
-                # Case 2: Alternative classification format
-                elif "classes" in prediction and "scores" in prediction:
-                    labels = prediction["classes"]
-                    scores = prediction["scores"]
-                    if labels and scores:
-                        max_idx = scores.index(max(scores))
-                        return {
-                            "stage": labels[max_idx],
-                            "confidence": float(scores[max_idx]),
-                            "success": True,
-                            "response_type": "classification"
-                        }
-            
-            # Case 3: Embedding output (current issue)
-            if "embedding" in prediction:
-                embedding = prediction["embedding"]
-                logging.warning("⚠️ Received embedding instead of classification. Endpoint may be misconfigured.")
-            
-                # Compute variance manually (to avoid numpy dependency)
-                if len(embedding) > 1:
-                    mean = sum(embedding) / len(embedding)
-                    variance = sum((x - mean) ** 2 for x in embedding) / (len(embedding) - 1)
-                else:
-                    variance = 0.0
-            
-                # Very basic classification based on embedding characteristics
-                if variance > 0.01:  # Adjust this threshold based on your data
-                    stage = "Suspicious - Further evaluation needed"
-                    confidence = min(variance * 10, 0.8)  # Scale variance to confidence
-                else:
-                    stage = "Normal - No significant abnormalities detected"
-                    confidence = 0.7
-            
-                return {
-                    "stage": stage,
-                    "confidence": float(confidence),
-                    "success": True,
-                    "response_type": "embedding_fallback",
-                    "note": "Analysis based on image features. Clinical evaluation required."
-                }
-
-            
-            # Case 4: Unknown format - return raw prediction
-            logging.warning(f"⚠️ Unknown prediction format: {type(prediction)}")
+        logging.info(f"Hugging Face analysis result: {json.dumps(result, indent=2)}")
+        
+        if result["success"] and result["top_prediction"]:
+            top_pred = result["top_prediction"]
             return {
-                "stage": "Analysis Complete - Raw Features Extracted",
-                "confidence": 0.5,
+                "stage": top_pred["label"],
+                "confidence": float(top_pred["confidence"]),
                 "success": True,
-                "response_type": "unknown_format",
-                "raw_prediction": str(prediction)[:500],
-                "note": "Features extracted successfully. Clinical interpretation needed."
+                "response_type": "classification",
+                "all_predictions": result["predictions"]
             }
         else:
             return {
                 "stage": "Error",
                 "confidence": 0,
                 "success": False,
-                "error": "No predictions in response"
+                "error": "No valid predictions received"
             }
 
     except Exception as e:
         logging.error(f"❌ Staging error: {e}")
-        logging.error(f"❌ Stack trace: {traceback.format_exc()}")
         return {
             "stage": "Error",
             "confidence": 0,
@@ -623,14 +552,12 @@ def stage_cervical_cancer(image_path):
             "error": str(e)
         }
 
-
-# Database setup (optional)
+# Database setup (optional) - Keep your existing database code
 db = False
 if os.environ.get("DB_URL"):
     try:
         db = True
-        db_url = os.environ.get("DB_URL")  # Database URL
-        # Check if this is a Redis URL and skip SQLAlchemy setup if so
+        db_url = os.environ.get("DB_URL")
         if db_url and "redis" not in db_url:
             engine = create_engine(db_url)
             Session = sessionmaker(bind=engine)
@@ -716,7 +643,6 @@ def handle_language_detection(sender, prompt, phone_id):
     user_states[sender]["step"] = "worker_id"
     user_states[sender]["needs_language_confirmation"] = False
 
-    # Send appropriate greeting based on language
     if detected_lang == "english":        
         send("Hello! I'm Rudo, Dawa Health's virtual assistant. Let's start with registration. What is your Worker ID?", sender, phone_id)
     
@@ -774,33 +700,27 @@ def handle_patient_id(sender, prompt, phone_id):
     save_user_state(sender, state)
 
 def handle_cervical_image(sender, media_id, phone_id):
-    """Handle cervical cancer image analysis with improved feedback"""
+    """Handle cervical cancer image analysis with Hugging Face"""
     state = user_states[sender]
     lang = state["language"]
 
-    # ✅ Check if we're already processing an image for this user
     if state.get("processing_image"):
         print(f"⚠️ Already processing image for {sender}, skipping duplicate")
         return
     
-    # ✅ Set processing flag to prevent duplicate processing
     state["processing_image"] = True
-    save_user_state(sender, state)  # Save immediately to persist the flag
+    save_user_state(sender, state)
 
     try:
-        # File path for the incoming image
         image_path = f"/tmp/{sender}_{int(time.time())}.jpg"
 
-        # Localized "analyzing" message
         waiting_messages = {
             "shona": "📨 Ndiri kuongorora mufananidzo wenyu...",
             "ndebele": "📨 Ngiyahlola isithombe sakho...", 
             "english": "📨 Analyzing your image..."
         }
 
-        # Try to download media
         if download_whatsapp_media(media_id, image_path):
-            # ✅ Only send analyzing message once we have the file
             waiting_message = waiting_messages.get(lang, waiting_messages["english"])
             send(waiting_message, sender, phone_id)
 
@@ -812,12 +732,9 @@ def handle_cervical_image(sender, media_id, phone_id):
             if result["success"]:
                 stage = result["stage"]
                 confidence = result["confidence"]
-                response_type = result.get("response_type", "unknown")
 
-                # Classification results
-                if response_type == "classification":
-                    if lang == "shona":
-                        response = f"""🔬 MedSigLip Ongororo:
+                if lang == "shona":
+                    response = f"""🔬 Hugging Face Ongororo:
 
 📋 Worker ID: {worker_id}
 👤 Patient ID: {patient_id}
@@ -825,8 +742,8 @@ def handle_cervical_image(sender, media_id, phone_id):
 ✅ Chivimbo: {confidence:.1%}
 
 💡 Ziva: Izvi hazvitsivi kuongororwa kwechiremba."""
-                    elif lang == "ndebele":
-                        response = f"""🔬 Imiphumela yeMedSigLip:
+                elif lang == "ndebele":
+                    response = f"""🔬 Imiphumela yeHugging Face:
 
 📋 I-Worker ID: {worker_id}
 👤 I-Patient ID: {patient_id}
@@ -834,8 +751,8 @@ def handle_cervical_image(sender, media_id, phone_id):
 ✅ Ukuthemba: {confidence:.1%}
 
 💡 Qaphela: Lokhu akufaki esikhundleni sokuhlolwa kadokotela."""
-                    else:
-                        response = f"""🔬 MedSigLip Analysis Results:
+                else:
+                    response = f"""🔬 Hugging Face Analysis Results:
 
 📋 Worker ID: {worker_id}
 👤 Patient ID: {patient_id}
@@ -843,48 +760,7 @@ def handle_cervical_image(sender, media_id, phone_id):
 ✅ Confidence: {confidence:.1%}
 
 💡 Note: This does not replace a doctor's diagnosis."""
-                
-                # Embedding-based fallback
-                elif response_type == "embedding_fallback":
-                    note = result.get("note", "")
-                    if lang == "shona":
-                        response = f"""🔬 Ongororo Yakaitwa:
-
-📋 Worker ID: {worker_id}
-👤 Patient ID: {patient_id}
-🏥 Mhedzisiro: {stage}
-✅ Chivimbo: {confidence:.1%}
-
-💡 {note}"""
-                    else:
-                        response = f"""🔬 Feature Analysis Results:
-
-📋 Worker ID: {worker_id}
-👤 Patient ID: {patient_id}
-🏥 Findings: {stage}
-✅ Confidence: {confidence:.1%}
-
-💡 {note}"""
-                else:
-                    # Unknown format
-                    if lang == "shona":
-                        response = f"""🔬 Mufananidzo Wagamuchirwa:
-
-📋 Worker ID: {worker_id}
-👤 Patient ID: {patient_id}
-🏥 Zvakaonekwa: Mufananidzo wakaongororwa zvakanaka
-
-💡 Chiremba achakupa mhedzisiro chaiyo."""
-                    else:
-                        response = f"""🔬 Image Analysis Complete:
-
-📋 Worker ID: {worker_id}
-👤 Patient ID: {patient_id}
-🏥 Status: Image processed successfully
-
-💡 Doctor will provide detailed interpretation."""
             else:
-                # ❌ Analysis error
                 error_msg = result.get("error", "Unknown error")
                 if lang == "shona":
                     response = f"""❌ Hatina kukwanisa kuongorora mufananidzo:
@@ -899,7 +775,6 @@ Error: {error_msg}
 
 💡 Please try another image or consult a doctor."""
 
-            # Cleanup temp image
             try:
                 os.remove(image_path)
             except:
@@ -908,7 +783,6 @@ Error: {error_msg}
             send(response, sender, phone_id)
 
         else:
-            # ❌ Download failed
             if lang == "shona":
                 send("❌ Hatina kukwanisa kugamuchira mufananidzo. Edza zvakare.", sender, phone_id)
             elif lang == "ndebele":
@@ -916,7 +790,6 @@ Error: {error_msg}
             else:
                 send("❌ Could not download image. Please try again.", sender, phone_id)
 
-        # 🔄 Always advance to follow_up, success or failure
         state["step"] = "follow_up"
         questions = {
             "shona": "Unoda kuendesa imwe mufananidzo here? (Ehe/Aihwa)",
@@ -924,12 +797,10 @@ Error: {error_msg}
             "english": "Would you like to submit another image? (Yes/No)"
         }
         
-        # FIX: Select the question based on language
         question = questions.get(lang, questions["english"])
         send(question, sender, phone_id)
 
     except Exception as e:
-        # ✅ Handle any unexpected errors
         print(f"❌ Error in handle_cervical_image for {sender}: {e}")
         error_msg = "An error occurred during processing. Please try again."
         if lang == "shona":
@@ -940,10 +811,8 @@ Error: {error_msg}
         send(f"❌ {error_msg}", sender, phone_id)
         
     finally:
-        # ✅ Always clear the processing flag, even if there's an error
         state["processing_image"] = False
         save_user_state(sender, state)
-
 
 def handle_follow_up(sender, prompt, phone_id):
     """Handle follow-up after diagnosis"""
@@ -953,7 +822,6 @@ def handle_follow_up(sender, prompt, phone_id):
     prompt_lower = prompt.lower()
     
     if any(word in prompt_lower for word in ["yes", "ehe", "yebo", "hongu", "ndinoda"]):
-        # Go directly to image upload for the same patient
         state["step"] = "awaiting_image"
         if lang == "shona":
             send("Tumirai imwe mufananidzo wekuongororwa.", sender, phone_id)
@@ -961,15 +829,13 @@ def handle_follow_up(sender, prompt, phone_id):
             send("Please upload another image for analysis.", sender, phone_id)
     
     else:
-        # End session
         state["step"] = "main_menu"
         if lang == "shona":
-            send("Ndatenda nekushandisa Dawa Health neMedSigLip technology. Kana uine mimwe mibvunzo, tendera kuti ndikubatsire.", sender, phone_id)
+            send("Ndatenda nekushandisa Dawa Health neHugging Face technology. Kana uine mimwe mibvunzo, tendera kuti ndikubatsire.", sender, phone_id)
         else:
-            send("Thank you for using Dawa Health with MedSigLip technology. If you have more questions, feel free to ask.", sender, phone_id)
+            send("Thank you for using Dawa Health with Hugging Face technology. If you have more questions, feel free to ask.", sender, phone_id)
     
     save_user_state(sender, state)
-
 
 def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_type=None):
     """Handle conversation based on current state"""
@@ -980,7 +846,6 @@ def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_ty
     
     prompt_lower = prompt.strip().lower()
 
-    # 🔄 Global reset trigger
     reset_keywords = ["hey", "hi", "hello", "mhoro", "mhoroi", "sawubona", "unjani"]
     if prompt_lower in reset_keywords:
         user_states[sender] = {
@@ -998,12 +863,10 @@ def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_ty
 
     logging.info(f"💬 Processing message from {sender}, current step: {state['step']}")
 
-    # 📷 If user sends an image during diagnosis
     if media_type == "image" and state["step"] == "awaiting_image":
         handle_cervical_image(sender, media_url, phone_id)
         return
     
-    # 🌍 Route by state
     if state["step"] == "language_detection":
         handle_language_detection(sender, prompt, phone_id)
     elif state["step"] == "worker_id":
@@ -1013,7 +876,6 @@ def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_ty
     elif state["step"] == "follow_up":
         handle_follow_up(sender, prompt, phone_id)
     elif state["step"] == "main_menu":
-        # General queries via Gemini
         lang = state.get("language", "english")
         fresh_convo = model.start_chat(history=[])
         try:
@@ -1021,7 +883,6 @@ def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_ty
             fresh_convo.send_message(prompt)
             reply = fresh_convo.last.text
 
-            # 🧹 Filter out any internal instructions
             filtered_reply = re.sub(
                 r'(Alright, you are now connected to the backend\.|Here are the links to the product images for Dawa Health:.*?https?://\S+)',
                 '', reply, flags=re.DOTALL
@@ -1042,12 +903,10 @@ def handle_conversation_state(sender, prompt, phone_id, media_url=None, media_ty
             else:
                 send("Sorry, we're experiencing high traffic. Please try again later.", sender, phone_id)
     else:
-        # Default: restart at language detection
         state["step"] = "language_detection"
         handle_language_detection(sender, prompt, phone_id)
 
     save_user_state(sender, state)
-
 
 def message_handler(data, phone_id):
     global user_states
@@ -1055,13 +914,11 @@ def message_handler(data, phone_id):
     sender = data["from"]
     logging.info(f"📩 Received message from {sender}")
     
-    # Load user state from Redis with better handling
     state = get_user_state(sender)
     if state:
         user_states[sender] = state
         logging.info(f"📥 Loaded existing state for {sender}: {state['step']}")
     else:
-        # Only initialize if truly new user (not in memory either)
         if sender not in user_states:
             user_states[sender] = {
                 "step": "language_detection",
@@ -1073,199 +930,61 @@ def message_handler(data, phone_id):
                 "conversation_history": []
             }
             save_user_state(sender, user_states[sender])
-            logging.info(f"🆕 Created new state for {sender}")
+            logging.info(f"🆕 Created new state for {sender}: language_detection")
         else:
-            logging.info(f"💾 Using in-memory state for {sender}: {user_states[sender]['step']}")
-    
-    # Extract message and media
-    prompt = ""
-    media_url = None
-    media_type = None
-    
-    if data["type"] == "text":
+            logging.info(f"📥 Using in-memory state for {sender}: {user_states[sender]['step']}")
+
+    if "text" in data:
         prompt = data["text"]["body"]
-        logging.info(f"💬 Text message: {prompt[:100]}...")
-    elif data["type"] == "image":
-        media_type = "image"
-        media_url = data["image"]["id"]
-        logging.info(f"🖼️ Image received, media_id: {media_url}")
-        # Use a placeholder prompt for image processing
-        prompt = "IMAGE_UPLOADED"
+        save_user_conversation(sender, "user", prompt)
+        handle_conversation_state(sender, prompt, phone_id)
+    elif "image" in data:
+        media_id = data["image"]["id"]
+        handle_conversation_state(sender, "", phone_id, media_url=media_id, media_type="image")
     else:
-        prompt = "UNSUPPORTED_MESSAGE_TYPE"
-        logging.warning(f"⚠️ Unsupported message type: {data['type']}")
-    
-    # Save user message to conversation history
-    save_user_conversation(sender, "user", prompt)
-    
-    # Handle the conversation based on current state
-    handle_conversation_state(sender, prompt, phone_id, media_url, media_type)
-    
-    # Save updated state to Redis
-    save_user_state(sender, user_states[sender])
+        logging.info(f"❓ Unsupported message type from {sender}")
+        send("I can only process text and images at the moment.", sender, phone_id)
 
-@app.route('/', methods=['GET'])
-def home():
-    return render_template('connected.html')
-
-@app.route('/webhook', methods=['GET'])
+@app.route('/webhook', methods=['GET', 'POST'])
 def webhook():
-    try:
-        if request.args.get('hub.verify_token') == 'my_verify_token':
-            return request.args.get('hub.challenge')
+    if request.method == 'GET':
+        mode = request.args.get('hub.mode')
+        token = request.args.get('hub.verify_token')
+        challenge = request.args.get('hub.challenge')
+        if mode == 'subscribe' and token == 'hello':
+            logging.info('✅ Webhook verified successfully!')
+            return challenge
         else:
-            return 'Error, wrong validation token'
-    except Exception as e:
-        logging.error(f"❌ Webhook verification error: {e}")
-        return 'Error'
-
-@app.route('/webhook', methods=['POST'])
-def webhook_handle():
-    try:
+            logging.error('❌ Webhook verification failed!')
+            return 'Verification failed', 403
+    
+    elif request.method == 'POST':
         data = request.get_json()
-        logging.info(f"📨 Received webhook data: {json.dumps(data, indent=2)}")
+        logging.info(f'📨 Received webhook data: {json.dumps(data, indent=2)}')
         
         if data.get("object") == "whatsapp_business_account":
-            for entry in data.get("entry", []):
-                for change in entry.get("changes", []):
-                    if change.get("field") == "messages":
+            try:
+                for entry in data.get("entry", []):
+                    for change in entry.get("changes", []):
                         value = change.get("value", {})
                         if "messages" in value:
                             for message in value["messages"]:
-                                message_handler(message, phone_id)
-        return jsonify({"status": "success"}), 200
-    except Exception as e:
-        logging.error(f"❌ Webhook handling error: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@app.route('/health', methods=['GET'])
-def health_check():
-    """Health check endpoint"""
-    status = {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "redis_connected": redis_client is not None,
-        "vertex_ai_configured": vertex_ai_client is not None,
-        "vertex_ai_project": VERTEX_AI_PROJECT is not None,
-        "vertex_ai_endpoint": VERTEX_AI_ENDPOINT_ID is not None,
-        "gemini_configured": gen_api is not None,
-        "whatsapp_configured": wa_token is not None and phone_id is not None,
-        "user_states_count": len(user_states)
-    }
-    
-    # Add more detailed Vertex AI info
-    if vertex_ai_client:
-        status["vertex_ai_details"] = {
-            "project_id": vertex_ai_client.project_id,
-            "endpoint_id": vertex_ai_client.endpoint_id,
-            "base_url": vertex_ai_client.base_url
-        }
-    
-    # Test Redis connection
-    if redis_client:
-        try:
-            redis_client.ping()
-            status["redis_status"] = "connected"
-            # Get some Redis stats
-            status["redis_info"] = {
-                "db_size": len(redis_client.keys("*")),
-                "user_states_in_redis": len(redis_client.keys("user_state:*"))
-            }
-        except Exception as e:
-            status["redis_status"] = f"error: {str(e)}"
-            status["status"] = "degraded"
-    
-    return jsonify(status)
-
-@app.route('/test-vertex', methods=['GET'])
-def test_vertex():
-    """Test Vertex AI connection"""
-    if not vertex_ai_client:
-        return jsonify({"error": "Vertex AI client not configured"}), 500
-    
-    try:
-        # Simple test payload
-        test_payload = {"instances": [{"test": "connection"}]}
-        result = vertex_ai_client.predict(test_payload)
-        return jsonify({"status": "success", "result": result})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/test-redis', methods=['GET'])
-def test_redis():
-    """Test Redis connection"""
-    if not redis_client:
-        return jsonify({"error": "Redis client not configured"}), 500
-    
-    try:
-        # Test basic operations
-        test_key = "test:connection"
-        test_value = {"timestamp": datetime.now().isoformat(), "test": "success"}
+                                if message.get("type") in ["text", "image"]:
+                                    threading.Thread(
+                                        target=message_handler,
+                                        args=(message, phone_id)
+                                    ).start()
+                return 'OK', 200
+            except Exception as e:
+                logging.error(f'❌ Error processing webhook: {e}')
+                return 'Error processing webhook', 500
         
-        # Set value
-        redis_client.setex(test_key, timedelta(minutes=5), json.dumps(test_value))
-        
-        # Get value
-        retrieved = redis_client.get(test_key)
-        
-        # Get some stats
-        keys_count = len(redis_client.keys("*"))
-        user_states_count = len(redis_client.keys("user_state:*"))
-        
-        return jsonify({
-            "status": "success",
-            "set_get_test": json.loads(retrieved) if retrieved else None,
-            "stats": {
-                "total_keys": keys_count,
-                "user_states": user_states_count
-            }
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return 'Unsupported event type', 400
 
-# Load user states on startup
-load_user_states()
-
-# Pre-warm the TLD cache in background
-def warmup_tld_cache():
-    try:
-        extractor.update()
-        logging.info("✅ TLD cache warmed up successfully")
-    except Exception as e:
-        logging.warning(f"⚠️ TLD cache warmup failed: {e}")
-
-# Start warmup in background thread
-tld_thread = threading.Thread(target=warmup_tld_cache, daemon=True)
-tld_thread.start()
-
-logging.info("🚀 Application started successfully!")
-
-@app.route('/debug-vertex-response', methods=['GET'])
-def debug_vertex_response():
-    """Debug endpoint to check Vertex AI response format"""
-    if not vertex_ai_client:
-        return jsonify({"error": "Vertex AI not configured"}), 500
-    
-    # Test with a small sample image or mock data
-    test_payload = {
-        "instances": [{
-            "image_bytes": {"b64": "test"},
-            "key": "debug_key"
-        }]
-    }
-    
-    try:
-        result = vertex_ai_client.predict(test_payload)
-        return jsonify({
-            "status": "success",
-            "prediction_keys": list(result.keys()) if isinstance(result, dict) else str(type(result)),
-            "prediction_sample": str(result)[:1000] if result else "No result",
-            "endpoint_type": "Check if this returns classification or embedding"
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-        
+@app.route('/')
+def home():
+    return render_template('index.html')
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    load_user_states()
+    app.run(host='0.0.0.0', port=8080, debug=True)
